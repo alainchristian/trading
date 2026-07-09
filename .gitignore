@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+logs/*.log
+*.log
+.pytest_cache/
+.claude/
+
+# Local-only infra, not part of the tracked project
+_installers/
+_mt5-instance/
+_pg_backup/
+_postgres/
+_postgres_data/
+*.tmp
