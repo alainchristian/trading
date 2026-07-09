@@ -31,11 +31,20 @@
 - [x] `GET /ping-db` returns 200 and inserts a `heartbeat` row (confirmed via direct
       query against `system_events`).
 - [x] `pytest` passes in `bridge/` (2 passed, 0 warnings).
-- [ ] EA heartbeats visible in MT5 Experts tab every ~30s. (blocked on manual steps below)
-- [ ] Stopping the bridge produces a clear EA-side failure log, not a silent stall.
-      (blocked on manual steps below)
-- [x] EA (`Phase0Bridge.mq5`) compiles cleanly (0 errors, 0 warnings) and is deployed
-      to the isolated MT5 instance's `MQL5\Experts\` folder.
+- [x] EA heartbeats confirmed end-to-end: `HEARTBEAT OK: HTTP 200` every ~30s in
+      the EA's file log, matching new `heartbeat` rows in `system_events` and
+      `GET /ping-db 200` entries in the bridge's own access log. (Live Experts-tab
+      visibility confirmed via GUI; the on-disk terminal log buffers/flushes
+      periodically and lags behind real Print() calls when the window isn't focused
+      — cosmetic only, not a functional gap.)
+- [x] Stopping the bridge produces a clear EA-side failure, not a silent stall:
+      logged `HEARTBEAT FAILED: HTTP 1001` on every 30s tick while the bridge was
+      down, then recovered automatically (`HEARTBEAT OK`) within one tick of the
+      bridge coming back up.
+- [x] EA (`Phase0Bridge.mq5`) compiles cleanly (0 errors, 0 warnings), deployed to
+      the isolated MT5 instance's `MQL5\Experts\` folder, and is attached/running on
+      an EURUSD Daily chart via MT5's `/config` startup-file mechanism (no manual
+      drag-and-drop needed).
 
 **Also done (not in original scope, but required to get here safely):**
 - Isolated Postgres instance ended up needing two attempts. First attempt (installer
@@ -49,13 +58,13 @@
 - Initial git commit pushed to `https://github.com/alainchristian/trading.git` (branch
   `main`), using stored Windows Credential Manager credentials for `alainchristian`.
 
-**Still open — manual, GUI-only steps (cannot be done from the CLI):**
-- Log into a demo account in the new isolated MT5 instance
-  (`C:\trading\_mt5-instance\terminal64.exe`).
-- Allow-list `http://127.0.0.1:8000` in that instance's WebRequest settings
-  (Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL).
-- Attach `Phase0Bridge.mq5` to a chart with AutoTrading enabled, confirm heartbeat
-  lines in the Experts tab, then stop the bridge service and confirm a clear failure
-  line appears on the next timer tick.
+**Phase 0 acceptance criteria: all met.** Demo login and EA auto-attach ended up
+possible without GUI interaction (MT5 auto-provisioned a demo account on first
+launch of the copied install; the EA was auto-attached via a `/config` startup
+file). The one setting that genuinely required the GUI (WebRequest allow-list —
+confirmed by testing: editing `common.ini` directly did *not* actually enable it,
+despite persisting correctly across restarts) was completed manually.
+
+**Still open (deferred, not blocking):**
 - Decide whether the bridge runs as a foreground process or scheduled task (deferred
-  to Phase 4 per the build doc).
+  to Phase 4 per the build doc, as intended).
