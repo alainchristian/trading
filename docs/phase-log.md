@@ -25,18 +25,37 @@
 - Built repo skeleton: `.gitignore`, `.env.example`, `database/schema.sql`
   (`system_events` table), FastAPI bridge (`bridge/app/*`), `mt5/Phase0Bridge.mq5`.
 
-**Verified:** (fill in once end-to-end test runs)
-- [ ] `uvicorn app.main:app` starts and logs `startup` to file + `system_events`.
-- [ ] `GET /health` returns 200, no DB.
-- [ ] `GET /ping-db` returns 200 and inserts a `heartbeat` row.
-- [ ] EA heartbeats visible in MT5 Experts tab every ~30s.
+**Verified:**
+- [x] `uvicorn app.main:app` starts and logs `startup` to file + `system_events`.
+- [x] `GET /health` returns 200, no DB.
+- [x] `GET /ping-db` returns 200 and inserts a `heartbeat` row (confirmed via direct
+      query against `system_events`).
+- [x] `pytest` passes in `bridge/` (2 passed, 0 warnings).
+- [ ] EA heartbeats visible in MT5 Experts tab every ~30s. (blocked on manual steps below)
 - [ ] Stopping the bridge produces a clear EA-side failure log, not a silent stall.
-- [ ] `pytest` passes in `bridge/`.
+      (blocked on manual steps below)
+- [x] EA (`Phase0Bridge.mq5`) compiles cleanly (0 errors, 0 warnings) and is deployed
+      to the isolated MT5 instance's `MQL5\Experts\` folder.
 
-**Still open:**
-- User must log into a demo account in the new isolated MT5 instance
+**Also done (not in original scope, but required to get here safely):**
+- Isolated Postgres instance ended up needing two attempts. First attempt (installer
+  with custom `--prefix`/`--datadir`/`--servicename`) silently ignored those flags due
+  to a `Start-Process -ArgumentList` quoting bug and instead repaired the *existing*
+  Postgres install in place, causing a ~22 minute outage of the existing
+  `postgresql-x64-15` service (10:29-10:51 local). No data loss confirmed (binary
+  untouched, service recovered, `forex_trading_db` intact). Second attempt used the
+  portable zip binaries (no installer, no "detect existing install" behavior) — clean,
+  fully isolated at `C:\trading\_postgres` / `C:\trading\_postgres_data`, port 5433.
+- Initial git commit pushed to `https://github.com/alainchristian/trading.git` (branch
+  `main`), using stored Windows Credential Manager credentials for `alainchristian`.
+
+**Still open — manual, GUI-only steps (cannot be done from the CLI):**
+- Log into a demo account in the new isolated MT5 instance
   (`C:\trading\_mt5-instance\terminal64.exe`).
-- User must allow-list `http://127.0.0.1:8000` in that instance's WebRequest settings.
-- User must attach `Phase0Bridge.mq5` to a chart with AutoTrading enabled.
+- Allow-list `http://127.0.0.1:8000` in that instance's WebRequest settings
+  (Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL).
+- Attach `Phase0Bridge.mq5` to a chart with AutoTrading enabled, confirm heartbeat
+  lines in the Experts tab, then stop the bridge service and confirm a clear failure
+  line appears on the next timer tick.
 - Decide whether the bridge runs as a foreground process or scheduled task (deferred
   to Phase 4 per the build doc).
