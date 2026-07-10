@@ -193,6 +193,25 @@ public:
    // Call every tick (cheap: one MqlDateTime conversion + int compare in the
    // common case). Detects a new trading day (and, on Mondays, a new week),
    // resets the relevant starting balance, and logs the reset to Postgres.
+   //
+   // Fix (Phase 1 closeout, risk_state audit-trail bug): this is the only
+   // call site for LogRiskState, and it used to unconditionally log
+   // realized_pnl=0.0/loss_limit_hit=false/trading_halted=false regardless
+   // of what actually happened -- correct for the fresh day being opened,
+   // but it meant risk_state could never show a real halt, ever, since
+   // nothing runs again before the day ends. Fixed by logging the OUTGOING
+   // day's final tally here too, right before resetting for the new one,
+   // using the exact same realized-P&L calc and latched hit-flags
+   // CheckDailyLossLimit/CheckWeeklyLossLimit already use -- not a parallel
+   // computation, so risk_state can't drift from what actually gated
+   // entries that day. loss_limit_hit/trading_halted are the daily OR
+   // weekly flag (either one blocks entries; the schema has no separate
+   // weekly row), and realized_pnl is that DAY's own realized P&L (not the
+   // week's cumulative figure, even when it was the weekly limit that
+   // tripped -- the schema has one row per day, not a separate weekly
+   // figure). Known accepted gap: the very last day of a run never gets its
+   // closing row written, since there's no subsequent rollover to trigger
+   // it -- out of scope for this fix.
    void CheckRollover(CBridgeLogger &logger)
    {
       MqlDateTime dt;
@@ -201,6 +220,16 @@ public:
 
       if(today_key == m_last_day_key)
          return;
+
+      if(m_last_day_key != 0)
+      {
+         MqlDateTime prev_dt;
+         TimeToStruct(m_day_start_time, prev_dt);
+         string prev_date = StringFormat("%04d-%02d-%02d", prev_dt.year, prev_dt.mon, prev_dt.day);
+         double prev_realized = SumClosedProfitSince(m_day_start_time);
+         bool prev_hit = m_daily_loss_limit_hit || m_weekly_loss_limit_hit;
+         logger.LogRiskState(prev_date, "account", m_day_start_balance, prev_realized, prev_hit, prev_hit);
+      }
 
       bool is_new_week = (dt.day_of_week == 1) || (m_last_day_key == 0);
       m_last_day_key = today_key;

@@ -1096,3 +1096,57 @@ NO-GO. Anything that follows — a redesigned entry hypothesis, a different
 market thesis, broader feature engineering for the ML angle, or a decision
 to pause the project — is a new decision for the user to make, not an
 automatic next step from here.
+
+### Update, same day — Fix 1: `risk_state` audit-trail bug
+
+The gap flagged above (blocking works, `risk_state` never shows it) is
+fixed. Scoped to exactly one function, nothing else touched.
+
+**Fix:** `RiskManager::CheckRollover` was the only call site for
+`LogRiskState`, and it only ever ran at the *start* of a new day/week — by
+construction it could never observe a mid-day breach, since a fresh day's
+realized P&L is trivially 0 and its hit-flag trivially false. Fixed by
+additionally logging the *outgoing* day's final tally right before resetting
+for the new one, computed from the exact same source of truth
+`CheckDailyLossLimit`/`CheckWeeklyLossLimit` already use
+(`SumClosedProfitSince(m_day_start_time)` and the latched
+`m_daily_loss_limit_hit`/`m_weekly_loss_limit_hit` flags) — not a parallel
+calculation, so `risk_state` can't drift from what actually gated entries
+that day. `loss_limit_hit` and `trading_halted` are both set to
+`daily_hit OR weekly_hit` (either one blocks entries; the schema has no
+separate weekly row). `realized_pnl` reflects that day's own realized P&L,
+even on the 2016-09-01 row below where it was the *weekly* cumulative loss
+that actually tripped the halt — a necessary, stated caveat given one row
+per day, not per scope.
+
+**Known, accepted gap:** each trading day now produces two `risk_state` rows
+(an opening 0.0/false snapshot, and — logged one day later, retroactively —
+the closing tally). The very last day of any run never gets its closing row,
+since there's no subsequent rollover to trigger it. Both are acceptable
+given the fix's scope; not a hidden defect.
+
+**Verification — did not require a fresh multi-window run**, per the
+guidance to check first: re-ran only the 2 specific bench-mode
+window/instrument combinations containing the known real examples
+(w3 AUDUSD, w4 USDJPY — same date ranges, same settings, only the compiled
+binary changed), not the full addendum-1 batch.
+
+| Date | Scope | Realized P&L | `loss_limit_hit` | Context |
+|---|---|---:|---|---|
+| 2010-12-15 (opening row) | daily | $0.00 | false | as expected, day just started |
+| **2010-12-15 (closing row)** | daily | **-$320.86** | **true** | -3.08% of day-start balance ($10,428.94) — correctly crosses the 3% daily limit |
+| 2010-12-16 (next day) | daily | $0.00 | false | balance $10,108.08 = $10,428.94 - $320.86, exact carry-forward, trading resumed |
+| 2016-09-01 (opening row) | daily | $0.00 | false | as expected |
+| **2016-09-01 (closing row)** | weekly (via OR) | **-$204.55** | **true** | only -1.97% *that day* alone (below the 3% daily bar) — correctly reflects the *weekly* cumulative loss tripping the halt |
+
+**Normal-case spot check, 5 non-breach days, real trading activity, w3
+AUDUSD:** all correctly show `loss_limit_hit=false` with real (nonzero,
+both positive and negative) realized P&L, none near the 3% threshold
+(-0.68%, +0.32%, +0.34%, +1.50%, +2.77% of day-start balance) — the fix
+didn't just make the failure case work, the ordinary case is still correct
+too.
+
+**Recompiled clean (0 errors, 0 warnings).** Committed and re-tagged
+`phase1-closed-no-go-v2`, superseding `phase1-closed-no-go` — same NO-GO
+verdict, unchanged; only the risk_state logging defect is new information
+since the original tag.
