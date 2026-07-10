@@ -13,4 +13,5 @@ _mt5-instance/
 _pg_backup/
 _postgres/
 _postgres_data/
+_analysis_venv/
 *.tmp
