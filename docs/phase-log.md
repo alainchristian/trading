@@ -1150,3 +1150,605 @@ too.
 `phase1-closed-no-go-v2`, superseding `phase1-closed-no-go` — same NO-GO
 verdict, unchanged; only the risk_state logging defect is new information
 since the original tag.
+
+## 2026-07-10 — Phase 1b: mean-reversion hypothesis, build + pre-declaration
+
+**A genuinely new hypothesis, not a Phase 1 redesign**: price that becomes
+locally overextended during range-bound conditions tends to revert toward
+its recent mean — close to the opposite bet of Phase 1's trend-following
+premise. Reuses Phase 1's verified infrastructure as-is (bridge, full DB
+schema, `RiskManager.mqh`, `BridgeLogger.mqh`, `SessionFilter.mqh`,
+`SpreadFilter.mqh`, the walk-forward/benchmark methodology, the w3-w5 window
+boundaries, the same four instruments) and replaces only the entry/exit
+logic.
+
+**Four decisions confirmed with the user before any code was written:**
+1. Regime-filter timeframe: **H4** (not D1) — reuses `Trend.mqh`'s existing
+   ADX sideways threshold/classifier unmodified, just timeframe-parameterized
+   (defaults to D1, so Phase 1 itself is untouched) so it can run on H4.
+2. Band definition: **20-period SMA ± 2.0 SD on H1** (Bollinger-standard).
+3. Holding-period cap: **48 H1 bars**.
+4. Schema approach: **`strategy_variant` column** added to `signals`/`trades`
+   (default `'phase1_confluence'`, migrated live against the running
+   Postgres instance and reflected in `database/schema.sql`), rather than
+   separate parallel tables.
+
+**Built:**
+- `MeanReversionEntry.mqh` — five independently-evaluated, never-short-
+  circuited checks (regime filter, band touch, momentum extreme, reversal
+  candlestick, structural-level integrity), logged into the same `signals`
+  schema via a new `features` JSON shape specific to this hypothesis (no
+  schema change needed beyond `strategy_variant` — `features` was always
+  free-form JSONB). Reuses `Structure.mqh`'s swing detection and
+  `EntryLogic.mqh`'s exact candlestick-pattern detector (made `public` for
+  this reuse, previously `private`) rather than rebuilding either. Check 3
+  (momentum extreme) deliberately uses a *different condition shape* than
+  Phase 1's `RSIConfirms` — the same threshold value, but checking the
+  extreme itself rather than a recovery-already-underway pattern, since
+  that's the shape mean reversion actually needs; stated here as the reason
+  for the change, per the task's own instruction.
+- `MeanReversionExit.mqh` — its own exit structure, not inherited from
+  `ExitManager.mqh`: TP is the band's moving mean (re-read live every tick,
+  not a static broker order), SL is ATR-based by default with band-extreme
+  as an A/B-toggleable alternative (`InpMRSLMode`, same pattern as addendum
+  3's trailing-stop test), a simple breakeven-after-0.5R rule (reusing
+  `RiskManager`'s existing generic breakeven flag), and the 48-bar holding
+  cap forcing a market close tagged `exit_reason='timeout'`.
+- `Phase1bEA.mq5` — new EA (magic number `20260102`, distinct from Phase 1's
+  `20260101`), wiring the above plus unmodified reuse of `RiskManager.mqh`,
+  `SessionFilter.mqh`, `SpreadFilter.mqh`, `NewsFilter.mqh`,
+  `BridgeLogger.mqh`. Includes `InpBypassMeanReversion`, the same
+  no-filter-benchmark pattern Phase 1 used. Compiles clean (0 errors, 0
+  warnings).
+- `BridgeLogger.mqh` gained one small addition (`LogSignalJson`, a generic
+  JSON-body variant of `LogSignal` for strategies that don't share Phase 1's
+  specific `Signal` struct field names) and `LogTradeOpen` gained a
+  `strategy_variant` parameter — Phase 1's own call site updated to pass
+  `"phase1_confluence"` explicitly. `RiskManager.mqh` itself: untouched.
+
+**Smoke test** (EURUSD, 2020-01-01 to 2020-03-01, gated mode): ran without
+error, all five checks logged independently on every bar (confirmed: even
+the very first rejected signal carries all five `check1`-`check5` booleans,
+not a collapsed pass/fail), one real trade taken and closed correctly
+(`exit_reason:"tp_mean"`, r_multiple 0.159, profit +$13.86 matching the
+report exactly, mfe/mae both tracked and sensible).
+
+**Frequency check before finalizing the walk-forward design** (per Section 4
+— don't assume): ran EURUSD gated mode across the full w3-w5 span
+(2010.12-2026.07, ~15.7 years) — **57 trades**, ~3.6/year, net +$396.20, PF
+1.17, max drawdown 3.92%. Meaningfully more frequent than Phase 1's original
+~1/year problem. Pooled across 4 instruments this should land in the
+~200+ range across the full span — comfortably clearing a ≥100 pooled bar
+using the **same w3-w5 three-window structure Phase 1 used**, not a
+finer sub-window split like the ML signal-detection test needed.
+
+### Pre-declared design and success criteria (before the full batch runs)
+
+- **Walk-forward:** same w3-w5 windows (2010.12-2016.06, 2016.06-2021.12,
+  2021.12-2026.07), same 4 instruments (EURUSD, GBPUSD, USDJPY, AUDUSD),
+  gated mode and `InpBypassMeanReversion` benchmark mode for each — 24 runs
+  total, directly comparable to Phase 1's own addendum 1 Step 4 design.
+- **No per-window optimization** — same guardrail as every Phase 1 addendum.
+  Fixed configuration throughout (the four user-confirmed defaults above,
+  reused RSI/ADX thresholds); no threshold tuned based on early results
+  without the same bug-vs-strictness scrutiny Phase 1 held to.
+- **Consistency standard: reused directly from Phase 1's own go/no-go** — 
+  positive expectancy in most/all sequential windows counts as consistent;
+  one good window with the rest flat or negative counts as **inconsistent**,
+  same bar addendum 1 held the confluence strategy to.
+- **Sample-size bar: ≥100 pooled gated trades in aggregate** before treating
+  the go/no-go as more than directionally suggestive — same bar as Phase 1's
+  own walk-forward.
+- **Benchmark comparison is mandatory, not optional** — bypass the five-check
+  gate (`InpBypassMeanReversion=true`), identical risk sizing and exit
+  management, to check whether the entry conditions add expectancy over
+  fading any band touch unconditionally. This is exactly the check that
+  caught Phase 1's real problem (entries reducing trade count without adding
+  expectancy) and is held to the same importance here, not skipped.
+- **Go in expecting NO-GO is a real possibility** — this hypothesis being
+  "close to the opposite bet" of Phase 1's is a reason to test it, not a
+  reason to expect it to pass.
+
+Full walk-forward + benchmark batch not yet run — reported next, per the
+same "declare before running" discipline as every prior addendum.
+
+## 2026-07-10 — Phase 1b: walk-forward + benchmark result, go/no-go
+
+Ran the pre-declared 24-run batch (w3/w4/w5 × EURUSD/GBPUSD/USDJPY/AUDUSD ×
+gated/benchmark), archived cleanly (all 24 `COMPLETE.marker` + fallback logs
+present).
+
+**Per-instrument, gated mode:**
+
+| Window | Symbol | n | Win% | Net | PF | Avg R |
+|---|---|---:|---:|---:|---:|---:|
+| w3 | EURUSD | 24 | 41.7% | +$80.41 | 1.077 | +0.046 |
+| w3 | GBPUSD | 19 | 42.1% | -$38.26 | 0.953 | -0.007 |
+| w3 | USDJPY | 20 | 45.0% | +$421.39 | 1.690 | +0.190 |
+| w3 | AUDUSD | 17 | 64.7% | +$495.13 | 2.447 | +0.302 |
+| w4 | EURUSD | 19 | 52.6% | +$304.92 | 1.588 | +0.169 |
+| w4 | GBPUSD | 17 | 17.6% | -$685.77 | 0.260 | -0.403 |
+| w4 | USDJPY | 8 | 37.5% | -$293.30 | 0.416 | -0.357 |
+| w4 | AUDUSD | 13 | 46.2% | -$85.65 | 0.866 | -0.025 |
+| w5 | EURUSD | 14 | 42.9% | +$2.73 | 1.004 | +0.005 |
+| w5 | GBPUSD | 24 | 50.0% | +$205.94 | 1.224 | +0.092 |
+| w5 | USDJPY | 14 | 14.3% | -$630.63 | 0.172 | -0.464 |
+| w5 | AUDUSD | 11 | 27.3% | -$272.41 | 0.547 | -0.238 |
+
+**Per-window pooled (all 4 instruments), gated vs. benchmark:**
+
+| Window | Mode | n | Win% | Net | PF | Avg R |
+|---|---|---:|---:|---:|---:|---:|
+| w3 | gated | 80 | 47.5% | +$958.67 | 1.340 | +0.124 |
+| w3 | bench | 477 | 47.8% | -$1,343.19 | 0.934 | -0.026 |
+| w4 | gated | 57 | 38.6% | -$759.80 | 0.706 | -0.120 |
+| w4 | bench | 233 | 47.6% | -$3,598.27 | 0.640 | -0.155 |
+| w5 | gated | 63 | 36.5% | -$694.37 | 0.767 | -0.109 |
+| w5 | bench | 857 | 53.7% | +$1,979.30 | 1.056 | +0.023 |
+
+**Aggregate, w3-w5 pooled:**
+
+|  | Confluence-gated (5-check) | No-filter benchmark |
+|---|---:|---:|
+| n | 200 (clears the ≥100 bar) | 1,567 |
+| Win rate | 41.5% | 51.0% |
+| Net profit | -$495.50 | -$2,962.16 |
+| Profit Factor | 0.941 | 0.955 |
+| Avg R-multiple | -0.019 | -0.018 |
+
+**Exit reasons (gated, pooled): 112 `sl_hit`, 88 `tp_mean`, 0 `timeout`.** The
+48-bar holding cap never once bound across 200 trades — every trade resolved
+(one way or the other) faster than that. Not a problem, just never the
+active constraint; worth knowing before assuming the cap value matters.
+
+**Go/no-go, against the pre-declared bar:**
+
+1. **Inconsistent across windows — same failure mode as Phase 1's own
+   confluence logic.** Gated was strongly profitable in w3 (+0.124 avg R,
+   PF 1.34) but lost money in both w4 (-0.120) and w5 (-0.109). One good
+   window out of three, again.
+2. **Doesn't beat the benchmark.** PF (0.941 vs 0.955) and avg R (-0.019 vs
+   -0.018) are essentially indistinguishable between the gated five-check
+   version and unconditionally fading any band touch. The five checks
+   mainly reduce trade count (200 vs 1,567) without buying better
+   expectancy — the same pattern that closed out Phase 1.
+3. Sample clears the pre-declared ≥100 bar (200 gated trades), so this is a
+   real reading, not a thin-sample artifact.
+
+**Decision: NO-GO.** Same standard as Phase 1's own go/no-go, same result.
+The mean-reversion hypothesis — tested with the same rigor, the same
+window boundaries, and a mandatory benchmark comparison — does not clear
+the bar either. This is not a reason to iterate on band width, RSI
+threshold, or holding cap in this same pass (per the guardrail); it's a
+second, independent data point alongside Phase 1's that this general
+class of "one indicator combination on raw OHLC/RSI/ADX features, four
+majors, H1" approach isn't finding an edge on this data, echoing the ML
+signal-detection test's own conclusion. Whether the next step is a
+materially different feature set, a different market/timeframe, or
+reconsidering scope is a decision for the user — not an automatic next
+step from here.
+
+## 2026-07-10 — Market-character check: is w3 structurally different from w4/w5?
+
+**Measurement only, no new trading logic, no backtests.** Both Phase 1
+(trend-following) and Phase 1b (mean-reversion) — structurally opposite
+hypotheses — were profitable in w3 and unprofitable in both w4 and w5.
+Before scoping a third hypothesis, checked whether w3 itself is unusual in
+basic market-character terms, independent of any strategy.
+
+**Method:** a new read-only logger (`MarketCharacterDumpEA.mq5` — no entries,
+no exits, no risk management, not a backtest of anything) reusing `Trend.mqh`
+unmodified (a D1 instance matching Phase 1's own usage, an H4 instance
+matching Phase 1b's) and `Volatility.mqh` unmodified (H1 ATR), logging real
+daily OHLC once per day and D1/H4 regime classification + H1 ATR + spread
+once per H1 bar. Run once per window/instrument (12 runs, no trading, fast).
+
+**Cross-instrument averages per window:**
+
+| Metric | w3 | w4 | w5 |
+|---|---:|---:|---:|
+| Daily range, median (pips) | 89.8 | 72.8 | 83.6 |
+| Annualized volatility | 9.28% | 8.43% | 9.18% |
+| Avg H1 ATR (pips) | 18.6 | 15.3 | 17.3 |
+| **Avg spread (points)** | **12.34** | **7.72** | **7.79** |
+| D1 sideways time | 10.0% | 10.3% | 9.9% |
+| H4 sideways time | 9.9% | 9.4% | 10.9% |
+
+**Per-instrument detail (daily range median / annualized vol / avg ATR / avg
+spread):**
+
+| | EURUSD | GBPUSD | USDJPY | AUDUSD |
+|---|---|---|---|---|
+| w3 | 98.4p / 9.33% / 20.0p / 8.96 | 105.1p / 7.54% / 20.8p / 14.59 | 69.0p / 9.33% / 15.3p / 10.98 | 86.8p / 10.93% / 18.4p / 14.81 |
+| w4 | 69.7p / 6.80% / 13.8p / 5.11 | 98.3p / 9.77% / 20.7p / 10.58 | 65.3p / 7.95% / 14.3p / 6.23 | 57.9p / 9.18% / 12.4p / 8.98 |
+| w5 | 71.1p / 7.69% / 14.6p / 5.53 | 88.3p / 8.53% / 18.5p / 9.39 | 114.3p / 10.06% / 23.4p / 8.18 | 60.7p / 10.42% / 12.8p / 8.05 |
+
+**Regime mix (D1 and H4) is essentially flat across all three windows** —
+~9-11% sideways time on both timeframes, in every window, for every
+instrument. No meaningful trending/ranging mix shift that would favor a
+trend-following strategy in w3 over w4/w5, or vice versa for mean reversion.
+This directly does not explain either strategy's differential performance.
+
+**Volatility/range is somewhat elevated in w3 vs. w4, but w5 looks similar
+to w3 on this dimension** — daily range and annualized vol in w5 (83.6 pips
+/ 9.18%) sit much closer to w3 (89.8 / 9.28%) than to w4 (72.8 / 8.43%). If
+volatility alone explained the pattern, w5 should have looked more like w4;
+it doesn't. Not a clean "w3 uniquely different" story on this dimension —
+w4 is more the outlier (lower) than w3 is.
+
+**Spread is the one dimension where w3 is clearly, consistently, and
+substantially different — and it points the wrong direction to explain
+w3's better performance.** Average spread in w3 (12.34 points) is roughly
+60% wider than both w4 (7.72) and w5 (7.79) — consistent across every
+single instrument (e.g. EURUSD 8.96→5.11→5.53, AUDUSD 14.81→8.98→8.05). A
+wider spread is a real cost headwind, eating into every trade's realized R —
+if anything, this should have made w3 *harder* to profit in, not easier.
+That both strategies still did best in w3 despite meaningfully worse cost
+conditions there makes the outperformance look a little more like it
+overcame a headwind than like it was riding a tailwind. Worth noting: w4 and
+w5's spread levels are nearly identical (7.72 vs. 7.79) — this reads as a
+one-time structural drop somewhere between w3 and w4, not a continuous
+narrowing trend across the whole 2010-2026 span. No claim made here about
+*why* (broker-side change, industry-wide liquidity shift, etc.) — out of
+scope, per the non-goals.
+
+**Direct answer to the question asked:** w3 does **not** look like a
+meaningfully different, friendlier trading regime in the ways that would
+intuitively explain two opposite strategies both doing well there.
+Regime mix is flat. Volatility is only weakly and inconsistently elevated
+(w5 looks similar to w3). The one clearly, consistently different
+dimension — spread — points toward w3 being a *harder* cost environment,
+not an easier one. **This leans toward the shared w3-good/w4-w5-bad pattern
+being closer to noise/luck in w3 specifically than to a well-explained
+market-character shift** — a useful, if slightly deflating, piece of context
+for however a third hypothesis gets scoped: it should not be tuned or
+validated with an expectation that w3-like conditions (by any measure found
+here) are identifiable or repeatable in advance.
+
+No regime detector or predictive model was built from this, per the
+non-goals — reported and stopped.
+
+## 2026-07-10 — ML escalation: richer features, nonlinear model, Step 0 (pre-declared)
+
+**Context:** the first signal-detection test (logistic regression, a modest
+already-logged feature set) found no signal — AUC flat 0.516-0.528 across 5
+folds. This escalates two things at once: a richer feature set (not limited
+to what one strategy's own gate happened to log) and a nonlinear model
+(gradient-boosted trees). Deliberately a combined test — isolating which
+change mattered, if either does, is a separate later step.
+
+**Kept identical to the first test, for direct comparability:**
+- **Target/label**: does price move favorably by ≥0.5R within the next 24 H1
+  bars, R = `atr_value × 1.75`. Not redefined.
+- **Universe and folds**: same 4 instruments (EURUSD/GBPUSD/USDJPY/AUDUSD),
+  same w3-w5 span, same 6 sequential ~2.6-year sub-windows, same 5 rolling
+  train-fold-k/test-fold-(k+1) out-of-sample tests.
+- **Success bar: AUC ≥ 0.55 in at least 3 of 5 folds = signal found.**
+  Explicitly unchanged from the first test — not picked to be easier to
+  clear. One fold clearing it with the rest at chance still counts as no
+  signal found, same standard as before.
+
+**What's actually new:**
+- **Every H1 bar in price history**, not bars filtered through Phase 1's or
+  Phase 1b's own entry gate (the first test's data source — Phase 1's
+  fallback logs — already logged every bar regardless of taken/rejected
+  status, so this is less of a change than it might sound, but stated
+  explicitly since the instruction called for it).
+- **New features** (Step 1, computed fresh from raw price history, not
+  reused from either strategy's logs): multi-timeframe MA distance (D1/H4/H1,
+  in ATR units), %B-style range position, lagged returns (1/4/24 bars),
+  rolling realized vol and its expansion/contraction vs. its own longer-term
+  average, cross-instrument recent returns (the other three pairs' moves as
+  features for each pair's own prediction), hour-of-day and day-of-week.
+- **Model**: `HistGradientBoostingClassifier` (scikit-learn, already
+  installed from the first test) — shallow trees, conservative settings, no
+  hyperparameter search. One fixed configuration.
+
+**Data source decision:** rather than extending the first test's log-parsing
+approach (which only has H1 close prices and the specific fields Phase 1's
+EA happened to compute — no raw OHLC, no H4/D1 bars), a new minimal
+read-only export EA (`MLFeatureDumpEA.mq5`) will log real H1 OHLCV plus
+`iATR`/`iRSI`(H1)/`iRSI`(H4)/`iADX`(H1)/spread directly per bar — calling
+MT5's own indicator functions directly (not importing/modifying `Trend.mqh`,
+`Momentum.mqh`, or `Volatility.mqh`) so this stays a standalone, read-only
+data pull with zero touch to any shared or live-strategy module, consistent
+with the "no changes to MQL5 or live infrastructure" non-goal. All *new*
+features (moving averages, %B, lags, rolling vol, cross-instrument returns,
+calendar) are then computed fresh in Python from the exported OHLCV — this
+is appropriate for genuinely new features (only the baseline ATR/RSI/ADX
+values need to match the first test's exact computation method for
+comparability, which is why those three alone are pulled from MT5's own
+indicators rather than reimplemented).
+
+**Leakage discipline, stated before building:** every feature must use only
+information available at the close of the bar being evaluated. All rolling
+windows are trailing-only (pandas `.rolling()`, never centered); any lagged
+feature is computed relative to the bar being evaluated, never referencing
+a later bar. This will be verified explicitly in Step 1, not just assumed.
+
+Building and running next — reported once, per the guardrail.
+
+## 2026-07-10 — ML escalation: result
+
+**Data:** `MLFeatureDumpEA.mq5` (read-only, calls MT5's own `iATR`/`iRSI`/
+`iADX` directly — no shared/live-strategy module touched) exported real H1
+OHLCV + indicators for all 4 instruments across the full w3-w5 span. Row
+counts (96,846 / 96,834 / 96,840 / 96,846) matched the first test's parsed
+counts exactly — same underlying price history, confirmed.
+
+**Leakage check (stated, not just assumed):** D1 EMA50/200 and H4 EMA50
+distances use `.shift(1)` at the daily/H4-bucket level — every H1 bar within
+a given day (or H4 bucket) uses the *prior* day's (or bucket's) closed EMA,
+never its own still-forming one, mirroring `Trend.mqh`'s own `shift=1`
+convention exactly. All rolling windows (`%B`, realized vol, vol expansion)
+use pandas' default trailing (right-aligned, never centered) window. Lagged
+returns and cross-instrument returns are contemporaneous-or-past only,
+never referencing a bar after the one being evaluated. Final joined dataset:
+387,270 rows — identical to the first test's row count after label
+dropna, a second independent consistency check.
+
+**Model:** `HistGradientBoostingClassifier`, one fixed conservative
+configuration, no tuning: `max_depth=4, max_iter=150, learning_rate=0.05,
+min_samples_leaf=200, l2_regularization=1.0`.
+
+**Walk-forward results, same 5 folds:**
+
+| Test fold | AUC (GBM, richer features) | AUC (logistic regression, baseline — first test) | Delta |
+|---|---:|---:|---:|
+| f2 | 0.524 | 0.522 | +0.002 |
+| f3 | 0.531 | 0.522 | +0.009 |
+| f4 | 0.533 | 0.528 | +0.005 |
+| f5 | 0.526 | 0.516 | +0.010 |
+| f6 | 0.517 | 0.526 | -0.009 |
+| **mean** | **0.526** | **0.523** | **+0.003** |
+
+**Folds clearing AUC ≥ 0.55: 0 of 5.**
+
+**Verdict: NO SIGNAL FOUND** — same standard as the first test (unchanged
+bar, as pre-declared), same result. Not ambiguous: every fold sits in a
+0.517-0.533 band, still nowhere near 0.55.
+
+**Did richer features + a nonlinear model move the needle at all?**
+Slightly — mean AUC ticked up from 0.523 to 0.526, with 4 of 5 folds
+individually higher (one, f6, lower). This is a genuinely different outcome
+than "zero movement," worth stating plainly rather than rounding to "nothing
+changed" — but a ~0.003 mean shift is not a meaningful step toward the
+0.55 bar, and doesn't change the verdict.
+
+**Feature importance (permutation, last fold, descriptive only — not used
+for tuning):** the model leaned most on volatility-related features
+(`vol_expansion`, `vol_short`, raw `atr`, `vol_regime_low`) and calendar
+(`hour`), ahead of the multi-timeframe price-position features
+(`h4_ema50_dist_atr`, `d1_ema200_dist_atr`, `h1_sma20_dist_atr`) and
+cross-instrument returns (`xret24_AUDUSD`, `xret4_USDJPY`). All importances
+are small in absolute terms (largest permutation AUC drop ≈ 0.004),
+consistent with a genuinely weak model rather than one variable quietly
+carrying real signal.
+
+**Third independent line of evidence, same conclusion.** Two hand-built
+strategies (Phase 1's confluence logic, Phase 1b's mean reversion) and now
+two ML approaches (linear model / modest features, nonlinear model / richer
+features) have all failed to find an edge in this instrument set at H1/H4/D1
+granularity using price-action-derived features. This meaningfully shifts
+the case for continuing to iterate on this same instrument set and data
+class versus a materially different feature source (order flow, sentiment,
+cross-asset macro context not derivable from these four pairs' own price
+history) or a different market/timeframe entirely — a decision for the user,
+not resolved here.
+
+No hyperparameter search, no second model, and no feature added mid-analysis
+were run in this pass — reported once, per the guardrail.
+
+## 2026-07-11 — Instrument-class pivot: gold & index, result
+
+**Context:** four independent, rigorous investigations on the four FX
+majors — two hand-built strategies, two ML approaches — all found no
+exploitable edge. This asks whether the limiting factor is these four pairs
+specifically, or this whole style of price-action analysis. **Pre-committed
+before running anything**: if this also comes back NO SIGNAL FOUND, the next
+step is not a fifth technical test — it's stepping back to reassess the
+project itself, specifically a shift toward a decision-support tool rather
+than a fully autonomous EA. That decision is recorded in advance here so it
+isn't improvised after a disappointing result.
+
+### Step 0 — instrument/history check, confirmed with the user before building
+
+Checked candidate symbols via a small read-only check EA (`InstrumentCheckEA.mq5`,
+run once per candidate as the Tester's own symbol — checking non-tested
+symbols from within a Tester run is unreliable, established empirically in
+Phase 1). Two things came back different than assumed:
+- **The gold symbol on this broker is `GOLD`, not `XAUUSD`** — confirmed
+  before building anything further.
+- **Every non-FX instrument checked (GOLD, US500, US30, US2000, DE40)
+  showed only ~3.5 years of history** in the initial narrow-window check —
+  meaningfully shorter than FX's 15+ years.
+
+**Confirmed with the user:** proceed with GOLD + US500 (the task's own
+stated default, symbol name corrected), and restructure the walk-forward to
+**4 sequential folds (3 out-of-sample test folds)** instead of 6/5, with the
+consistency bar adjusted to **2 of 3 folds clearing AUC ≥ 0.55**.
+
+Once the actual full-range export ran (rather than the narrow 4-day check
+window), real history turned out to extend further back than the initial
+check suggested — **2021-12-31 onward** for both instruments (~4.5 years,
+not ~3.5) — confirming the earlier `SERIES_FIRSTDATE` check itself was a
+narrow-window artifact, not authoritative. Noted for the record, not
+re-litigated: the fold design was already confirmed on the (slightly
+conservative) 3.5-year assumption and still fits comfortably in the actual
+~4.5-year span.
+
+**Real, unplanned finding: GOLD only quotes 9 server-time hours/day
+(15:00-23:59)** — a limited-session CFD product on this broker, not
+near-continuous like FX or the index (US500: ~15.6 bars/day, close to 24/5).
+This means the label's "24 H1 bars" lookahead spans roughly a full calendar
+week for GOLD, not roughly a day as for FX/US500 — a different practical
+meaning of the same nominal definition. Flagged plainly; the label was kept
+unchanged for comparability, per the task's own instruction, not silently
+redefined.
+
+### Steps 1-3 — data, model, results
+
+Reused `MLFeatureDumpEA.mq5` unchanged, run once per instrument across the
+full available history. Same feature set as the FX ML escalation test
+(baseline ATR/RSI/ADX/spread/session/vol-regime + multi-timeframe MA
+distance, %B, momentum lags, rolling vol expansion, calendar), with
+cross-instrument-return features adapted to GOLD↔US500 (each instrument's
+model gets the other's contemporaneous 1/4/24-bar returns, per the task's
+explicit allowance). Same model, unmodified: `HistGradientBoostingClassifier,
+max_depth=4, max_iter=150, learning_rate=0.05, min_samples_leaf=200,
+l2_regularization=1.0`.
+
+**Real data-quality issue found and handled the same way Phase 1 handled
+FX's synthetic-spread windows — excluded on an objective, checkable ground,
+not a post-hoc cherry-pick:** GOLD's export has a genuine **207-day gap**
+(2025-05-08 to 2025-12-02) with a **57% price discontinuity** across it
+(18.87 → 29.72) — a broker-side contract reset, not organic price movement.
+This landed right at the fold-3/fold-4 boundary of the originally-confirmed
+4-fold design, contaminating that test fold. Re-ran GOLD on the clean
+pre-gap subset only (2021-12-31 to 2025-05-08, 5,921 of 6,941 rows), 3
+folds / 2 test folds, with the standard tightened to **both folds must
+clear** (the same n=2 convention already established as the fallback during
+Step 0's fold-design discussion).
+
+**GOLD, original 4-fold run (fold 3→4 contaminated by the gap):**
+
+| Test fold | AUC |
+|---|---:|
+| f2 | 0.568 |
+| f3 | 0.533 |
+| f4 (contaminated) | 0.455 |
+
+**GOLD, clean pre-gap subset, 2 test folds:**
+
+| Test fold | AUC |
+|---|---:|
+| f2 | 0.580 |
+| f3 | 0.507 |
+
+1 of 2 clean folds clears 0.55 — under the n=2 standard (both must clear),
+**NO SIGNAL FOUND**. The one fold that did clear (0.580) did not replicate
+in the very next fold (0.507, essentially chance) — the same "doesn't
+replicate" pattern this entire investigation has consistently treated as
+insufficient evidence, not signal, going back to addendum 1's own standard.
+
+**US500, clean throughout, 3 test folds:**
+
+| Test fold | AUC |
+|---|---:|
+| f2 | 0.520 |
+| f3 | 0.526 |
+| f4 | 0.535 |
+
+0 of 3 folds clear 0.55 — **NO SIGNAL FOUND**, cleanly and consistently.
+These AUC values sit in essentially the same 0.52-0.53 band as every FX
+fold across both prior ML tests — not a new pattern, the same one.
+
+**Feature importance (descriptive only, both instruments):** GOLD leaned on
+`d1_ema50_dist_atr`, `vol_expansion`, `pct_b`; US500 leaned on `pct_b`,
+`atr`, `h4_ema50_dist_atr`. Broadly similar in character (volatility and
+price-position features dominant) to the FX escalation test's own
+importances — no qualitatively different pattern emerged for either new
+instrument.
+
+### Step 4 — combined verdict and the pre-committed next step
+
+**Combined verdict: NO SIGNAL FOUND**, for both instruments, on clean data.
+This extends the pattern from four FX majors to a metal and an equity
+index — five independent lines of evidence (two hand-built strategies, two
+FX ML tests, this cross-asset test) now point the same direction.
+
+**Per the pre-committed decision recorded before this test ran: no further
+instrument, feature set, or model is being scoped from here.** The
+automated-edge-search line of investigation that has run across every
+addendum since Phase 1's closeout is being paused. The next conversation is
+about the project's direction — specifically whether to continue as a fully
+autonomous EA search, or shift toward a decision-support tool that surfaces
+analysis for a human to act on — not another technical test. That is a
+scoping decision for the user to make explicitly, not an automatic
+continuation of this line.
+
+---
+
+# New phase: decision-support dashboard
+
+**This is a distinct new phase, not a continuation of the edge-search
+investigation above.** Everything from Phase 1 through the instrument-class
+pivot was about finding an automated, tradeable edge — none was found,
+across five independent tests. This phase builds the tool that follows from
+that result: a local dashboard that surfaces honest, structured market
+context for a *human* to make discretionary decisions with, plus the
+infrastructure to eventually evaluate whether *those* decisions carry an
+edge, the same rigorous way the automated strategies were evaluated.
+
+**What it is:** a descriptive market-context panel (trend/regime
+classification, volatility, session, spread, distance to nearby levels —
+all mechanical readouts of current/past price action), a verified
+position-sizing calculator, and a discretionary trade journal with a
+rationale field and honest realized-R summary stats.
+
+**What it is not, hard constraint:** nothing in this tool presents a
+prediction, confidence score, or probability derived from any of the tested
+models or entry-logic gates. Every one of them was shown to carry no real
+signal (AUC ~0.52-0.53 across the board, both hand-built strategies
+NO-GO). Displaying anything derived from them as if informative would be
+actively misleading regardless of caveats — so nothing from `signals`,
+`trades`, or any ML artifact is queried by this dashboard at all. Verified
+by explicit review of every screen before calling this done.
+
+## 2026-07-11 — Decision-support dashboard: build
+
+**Confirmed with the user before building:** lightweight web dashboard
+(extends the existing FastAPI bridge, no heavy framework) over an MT5
+on-chart panel; all six already-tested instruments (EURUSD, GBPUSD, USDJPY,
+AUDUSD, GOLD, US500); snapshot refresh on every H1 bar close, matching every
+prior investigation's own granularity.
+
+**Built:**
+- **`market_context` / `journal_trades` tables** — added to
+  `database/schema.sql` and migrated live against the running Postgres
+  instance.
+- **`ContextSnapshotEA.mq5`** — new, read-only, no trading. A single
+  multi-symbol EA (loops over all 6 instruments explicitly by symbol
+  parameter, not `_Symbol`) logging, once per instrument per H1 bar close:
+  D1/H4 trend classification (`Trend.mqh`, unmodified), ATR + volatility
+  regime (`Volatility.mqh`, unmodified), session (`SessionFilter.mqh`,
+  unmodified), spread (`SpreadFilter.mqh`'s *read* only, `GetCurrentSpreadPoints()`
+  — never its gating logic, since this panel shows spread, it doesn't block
+  anything), and distance to the nearest confirmed H4 swing level in ATR
+  units (`Structure.mqh`, unmodified). Verified via a single-symbol Tester
+  smoke run (Tester only reliably syncs its own tested symbol, established
+  empirically in Phase 1) — all fields computed sensibly across 144
+  snapshots, no crashes. `BridgeLogger.mqh` gained one small generic
+  addition (`PostJsonForId`, `LogSignalJson` now delegates to it) — no
+  other reused module touched.
+- **Bridge**: `POST /log-context`, `GET /context/{symbol}/latest`,
+  `GET /context/{symbol}/history`; `POST /risk/calculate` (ports
+  `RiskManager::CalculateLotSize` exactly — same formula, same floor-only
+  rounding, not reimplemented from scratch); `POST /journal/trades`,
+  `PATCH /journal/trades/{id}` (computes `r_multiple` server-side from the
+  *original* stored stop-loss, never a since-moved one — not trusted to
+  client input), `GET /journal/trades`, `GET /journal/summary`.
+- **Dashboard** (`bridge/app/static/dashboard.html`, served at `/`): context
+  cards per instrument with a staleness warning, the risk calculator, and
+  the journal (entry form with a required-in-spirit rationale field, a
+  close-out flow, and a summary strip). Polling refresh (90s) — no
+  websockets, per the confirmed design.
+
+**Verified end-to-end**, not just unit-by-unit: the EA's real JSON output
+was POSTed against the actual bridge and round-tripped through
+`GET /context/EURUSD/latest` correctly. The risk calculator was spot-checked
+against **4 known-correct rows from the Phase 1 closeout's own
+verification data** (EURUSD, USDJPY, AUDUSD, GBPUSD) — every one matched
+exactly (e.g. EURUSD: lot 0.17, risk 0.996% both times). The journal's open
+→ close → summary flow was exercised live (a test trade produced the exact
+expected R-multiple of 1.00 for a close at 1× the SL distance), then the
+test data was deleted from the real tables before finishing.
+
+**One operational note for the user, not resolved here:** a stale bridge
+process (running since earlier in the project, before these routes existed)
+is still bound to port 8000. The dashboard and new endpoints won't be live
+until that process is restarted — deliberately not force-killed by an
+unverified PID lookup rather than one tracked from being started this
+session; restarting it is a one-line action for the user
+(`uvicorn app.main:app --host 127.0.0.1 --port 8000`, after stopping
+whatever currently holds that port).

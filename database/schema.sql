@@ -16,6 +16,7 @@ CREATE INDEX IF NOT EXISTS idx_system_events_source ON system_events (source);
 -- Every setup the EA evaluates, whether taken or rejected
 CREATE TABLE IF NOT EXISTS signals (
     id                  BIGSERIAL PRIMARY KEY,
+    strategy_variant    TEXT NOT NULL DEFAULT 'phase1_confluence', -- 'phase1_confluence', 'phase1b_mean_reversion', ...
     symbol              TEXT NOT NULL,
     signal_time         TIMESTAMPTZ NOT NULL,
     direction           TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
@@ -39,10 +40,12 @@ CREATE TABLE IF NOT EXISTS signals (
 
 CREATE INDEX IF NOT EXISTS idx_signals_symbol_time ON signals (symbol, signal_time);
 CREATE INDEX IF NOT EXISTS idx_signals_taken ON signals (taken);
+CREATE INDEX IF NOT EXISTS idx_signals_strategy_variant ON signals (strategy_variant);
 
 -- Actual executed trades, linked back to the signal that triggered them
 CREATE TABLE IF NOT EXISTS trades (
     id                  BIGSERIAL PRIMARY KEY,
+    strategy_variant    TEXT NOT NULL DEFAULT 'phase1_confluence', -- 'phase1_confluence', 'phase1b_mean_reversion', ...
     signal_id           BIGINT REFERENCES signals(id),
     ticket              BIGINT NOT NULL UNIQUE,
     symbol              TEXT NOT NULL,
@@ -58,7 +61,7 @@ CREATE TABLE IF NOT EXISTS trades (
     r_multiple          DOUBLE PRECISION,          -- realized R, computed on close
     mfe                 DOUBLE PRECISION,          -- max favorable excursion, in price units
     mae                 DOUBLE PRECISION,          -- max adverse excursion, in price units
-    exit_reason         TEXT,                      -- 'tp1', 'tp2', 'trailing_stop', 'sl_hit', 'breakeven', 'manual_close', 'daily_limit_close'
+    exit_reason         TEXT,                      -- 'tp1', 'tp2', 'trailing_stop', 'sl_hit', 'breakeven', 'manual_close', 'daily_limit_close', 'timeout'
     profit              DOUBLE PRECISION,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -79,3 +82,49 @@ CREATE TABLE IF NOT EXISTS risk_state (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (trading_date, scope)
 );
+
+-- Phase: decision-support dashboard (post edge-search pivot)
+-- Descriptive/mechanical market context, one row per instrument per H1 bar
+-- close. Never a prediction/score -- see docs/phase-log.md for why.
+CREATE TABLE IF NOT EXISTS market_context (
+    id                  BIGSERIAL PRIMARY KEY,
+    symbol              TEXT NOT NULL,
+    snapshot_time       TIMESTAMPTZ NOT NULL,
+    d1_trend            TEXT,
+    h4_trend            TEXT,
+    atr_value           DOUBLE PRECISION,
+    volatility_regime   TEXT,
+    session             TEXT,
+    spread              DOUBLE PRECISION,
+    nearest_level_distance_atr DOUBLE PRECISION,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (symbol, snapshot_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_context_symbol_time ON market_context (symbol, snapshot_time DESC);
+
+-- Manually/discretionarily-entered trades. Deliberately separate from
+-- `trades` (the automated-strategy table) -- different provenance, should
+-- never be mixed into the automated system's own analysis without being
+-- clearly distinguishable.
+CREATE TABLE IF NOT EXISTS journal_trades (
+    id                  BIGSERIAL PRIMARY KEY,
+    symbol              TEXT NOT NULL,
+    direction           TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
+    open_time           TIMESTAMPTZ NOT NULL,
+    close_time          TIMESTAMPTZ,
+    open_price          DOUBLE PRECISION NOT NULL,
+    close_price         DOUBLE PRECISION,
+    stop_loss           DOUBLE PRECISION NOT NULL,
+    take_profit         DOUBLE PRECISION,
+    lot_size            DOUBLE PRECISION NOT NULL,
+    r_multiple          DOUBLE PRECISION,
+    rationale           TEXT,
+    context_snapshot_id BIGINT REFERENCES market_context(id),
+    outcome_notes       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_trades_symbol ON journal_trades (symbol);
+CREATE INDEX IF NOT EXISTS idx_journal_trades_open_time ON journal_trades (open_time);

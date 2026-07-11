@@ -253,10 +253,17 @@ private:
       return !is_fresh_breakout;
    }
 
+public:
    // Exactly two candlestick triggers for v1 (engulfing, pin bar), per the
    // doc's "pick 2-3, not an exhaustive library" guidance. A third
    // (inside-bar breakout) is deliberately deferred until walk-forward
    // testing shows the first two aren't enough.
+   //
+   // Public (not private, like the rest of this section) so Phase 1b's
+   // mean-reversion entry logic can reuse this exact, already-tested pattern
+   // detection for its own reversal-confirmation check, via a small
+   // CEntryLogic instance created solely for this method -- rather than
+   // duplicating the pattern logic in a new module.
    bool DetectCandlestickTrigger(bool is_buy, int shift, string &pattern_out)
    {
       double o1 = iOpen(m_symbol, PERIOD_H1, shift);
@@ -330,6 +337,7 @@ private:
       return false;
    }
 
+private:
    bool TickVolumeIncreased(int shift)
    {
       long v_curr = iVolume(m_symbol, PERIOD_H1, shift);

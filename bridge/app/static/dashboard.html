@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trading Decision Support</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --ink: #1b2027; --ink-soft: #5a6270; --paper: #f4f5f3; --card: #ffffff;
+    --line: #dde1db; --accent: #5a7d6c; --pos: #3f7d5c; --neg: #a8443a;
+    --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif; font-size: 15px; line-height: 1.5;
+  }
+  header { padding: 1.5rem 2rem 1rem; border-bottom: 1px solid var(--line); background: var(--card); }
+  header h1 { margin: 0 0 0.3rem; font-size: 1.4rem; }
+  header p { margin: 0; color: var(--ink-soft); font-size: 0.9rem; }
+  .notice {
+    margin-top: 0.6rem; font-size: 0.82rem; color: var(--accent);
+    border-left: 3px solid var(--accent); padding-left: 0.6rem;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 2rem 4rem; }
+  section { margin-bottom: 2.5rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.9rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.9rem; }
+  .ctx-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem;
+  }
+  .ctx-card .sym { font-weight: 700; font-size: 1.05rem; margin-bottom: 0.5rem; }
+  .ctx-card .row { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 0.15rem 0; }
+  .ctx-card .row .label { color: var(--ink-soft); }
+  .ctx-card .row .val { font-family: var(--mono); }
+  .ctx-card .stale { color: var(--neg); font-size: 0.78rem; margin-top: 0.4rem; }
+  .ctx-card .asof { color: var(--ink-soft); font-size: 0.72rem; margin-top: 0.5rem; }
+
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1.1rem 1.3rem; }
+  form.inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.7rem; align-items: end; }
+  label { display: block; font-size: 0.78rem; color: var(--ink-soft); margin-bottom: 0.25rem; }
+  input, select, textarea {
+    width: 100%; padding: 0.4rem 0.5rem; border: 1px solid var(--line); border-radius: 4px;
+    font-family: inherit; font-size: 0.9rem; background: var(--paper);
+  }
+  textarea { min-height: 3.5em; resize: vertical; }
+  button {
+    padding: 0.45rem 1rem; border: none; border-radius: 4px; background: var(--accent); color: white;
+    font-size: 0.88rem; cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: var(--ink-soft); }
+  .result-box {
+    margin-top: 0.9rem; padding: 0.7rem 0.9rem; background: var(--paper); border-radius: 4px;
+    font-family: var(--mono); font-size: 0.88rem; white-space: pre-wrap;
+  }
+  .result-box.error { color: var(--neg); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.8rem; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--ink-soft); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.num { font-family: var(--mono); text-align: right; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+
+  .summary-strip { display: flex; gap: 1.5rem; margin-bottom: 0.8rem; }
+  .summary-stat { font-size: 0.85rem; }
+  .summary-stat .n { font-family: var(--mono); font-size: 1.1rem; font-weight: 700; display: block; }
+  .summary-stat .l { color: var(--ink-soft); font-size: 0.72rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Trading Decision Support</h1>
+  <p>Market context, position sizing, and a discretionary trade journal.</p>
+  <p class="notice">Everything on this page is descriptive (what the market is currently doing) or mechanical
+     (position-sizing arithmetic). Nothing here is a prediction, confidence score, or recommendation — five
+     independent tests found no exploitable directional edge in this data. See docs/phase-log.md.</p>
+</header>
+
+<main>
+
+  <section>
+    <h2>Market Context</h2>
+    <div id="context-grid" class="card-grid"><p>Loading...</p></div>
+  </section>
+
+  <section>
+    <h2>Position Sizing Calculator</h2>
+    <div class="panel">
+      <form class="inline" id="risk-form">
+        <div>
+          <label for="risk-symbol">Instrument</label>
+          <select id="risk-symbol">
+            <option>EURUSD</option><option>GBPUSD</option><option>USDJPY</option>
+            <option>AUDUSD</option><option>GOLD</option><option>US500</option>
+          </select>
+        </div>
+        <div><label for="risk-balance">Account balance</label><input id="risk-balance" type="number" step="0.01" value="10000"></div>
+        <div><label for="risk-pct">Risk %</label><input id="risk-pct" type="number" step="0.1" value="1.0"></div>
+        <div><label for="risk-entry">Entry price</label><input id="risk-entry" type="number" step="0.00001"></div>
+        <div><label for="risk-sl">Stop-loss price</label><input id="risk-sl" type="number" step="0.00001"></div>
+        <div><button type="submit">Calculate</button></div>
+      </form>
+      <div id="risk-result" class="result-box" style="display:none;"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Trade Journal</h2>
+    <div class="panel">
+      <h3 style="margin-top:0; font-size:0.9rem;">New trade</h3>
+      <form class="inline" id="journal-open-form">
+        <div>
+          <label for="j-symbol">Instrument</label>
+          <select id="j-symbol">
+            <option>EURUSD</option><option>GBPUSD</option><option>USDJPY</option>
+            <option>AUDUSD</option><option>GOLD</option><option>US500</option>
+          </select>
+        </div>
+        <div><label for="j-dir">Direction</label><select id="j-dir"><option value="buy">buy</option><option value="sell">sell</option></select></div>
+        <div><label for="j-open">Open price</label><input id="j-open" type="number" step="0.00001"></div>
+        <div><label for="j-sl">Stop-loss</label><input id="j-sl" type="number" step="0.00001"></div>
+        <div><label for="j-tp">Take-profit (optional)</label><input id="j-tp" type="number" step="0.00001"></div>
+        <div><label for="j-lot">Lot size</label><input id="j-lot" type="number" step="0.01"></div>
+        <div style="grid-column: 1 / -1;"><label for="j-rationale">Rationale — why this trade, what context motivated it</label><textarea id="j-rationale"></textarea></div>
+        <div><button type="submit">Log trade</button></div>
+      </form>
+      <div id="journal-open-result" class="result-box" style="display:none;"></div>
+
+      <h3 style="font-size:0.9rem;">Summary</h3>
+      <div id="journal-summary" class="summary-strip"><p>Loading...</p></div>
+
+      <h3 style="font-size:0.9rem;">Recent trades</h3>
+      <table id="journal-table">
+        <thead><tr><th>ID</th><th>Symbol</th><th>Dir</th><th>Open</th><th>SL</th><th>Lot</th><th>Status</th><th>R</th><th>Rationale</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const SYMBOLS = ["EURUSD","GBPUSD","USDJPY","AUDUSD","GOLD","US500"];
+const STALE_HOURS = 6; // flag a context card as stale if its last snapshot is older than this
+
+function fmtNum(v, digits) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toFixed(digits === undefined ? 5 : digits);
+}
+function esc(s) {
+  if (s === null || s === undefined) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+async function loadContext() {
+  const grid = document.getElementById("context-grid");
+  const cards = await Promise.all(SYMBOLS.map(async (sym) => {
+    try {
+      const r = await fetch(`/context/${sym}/latest`);
+      if (!r.ok) return `<div class="ctx-card"><div class="sym">${sym}</div><div class="stale">No snapshot yet — ContextSnapshotEA may not be running against this symbol.</div></div>`;
+      const c = await r.json();
+      const ts = new Date(c.snapshot_time);
+      const ageHours = (Date.now() - ts.getTime()) / 3600000;
+      const staleNote = ageHours > STALE_HOURS ? `<div class="stale">Stale — last snapshot ${ageHours.toFixed(1)}h ago</div>` : "";
+      return `<div class="ctx-card">
+        <div class="sym">${sym}</div>
+        <div class="row"><span class="label">D1 trend</span><span class="val">${esc(c.d1_trend)}</span></div>
+        <div class="row"><span class="label">H4 trend</span><span class="val">${esc(c.h4_trend)}</span></div>
+        <div class="row"><span class="label">ATR (H1)</span><span class="val">${fmtNum(c.atr_value, 5)}</span></div>
+        <div class="row"><span class="label">Vol regime</span><span class="val">${esc(c.volatility_regime)}</span></div>
+        <div class="row"><span class="label">Session</span><span class="val">${esc(c.session)}</span></div>
+        <div class="row"><span class="label">Spread</span><span class="val">${fmtNum(c.spread, 1)}</span></div>
+        <div class="row"><span class="label">Nearest level</span><span class="val">${fmtNum(c.nearest_level_distance_atr, 2)} ATR</span></div>
+        ${staleNote}
+        <div class="asof">as of ${ts.toLocaleString()}</div>
+      </div>`;
+    } catch (e) {
+      return `<div class="ctx-card"><div class="sym">${sym}</div><div class="stale">Fetch error</div></div>`;
+    }
+  }));
+  grid.innerHTML = cards.join("");
+}
+
+document.getElementById("risk-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    symbol: document.getElementById("risk-symbol").value,
+    balance: parseFloat(document.getElementById("risk-balance").value),
+    risk_percent: parseFloat(document.getElementById("risk-pct").value),
+    entry_price: parseFloat(document.getElementById("risk-entry").value),
+    stop_loss_price: parseFloat(document.getElementById("risk-sl").value),
+  };
+  const box = document.getElementById("risk-result");
+  box.style.display = "block";
+  try {
+    const r = await fetch("/risk/calculate", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) { box.className = "result-box error"; box.textContent = "Error: " + (data.detail || r.statusText); return; }
+    box.className = "result-box";
+    box.textContent = `Lot size: ${data.lot_size}\nSL distance: ${fmtNum(data.sl_distance_price, 5)}\nRisk: $${fmtNum(data.risk_money, 2)}  (${fmtNum(data.risk_percent_actual, 3)}% of balance)`;
+  } catch (err) {
+    box.className = "result-box error"; box.textContent = "Request failed: " + err;
+  }
+});
+
+document.getElementById("journal-open-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    symbol: document.getElementById("j-symbol").value,
+    direction: document.getElementById("j-dir").value,
+    open_time: new Date().toISOString(),
+    open_price: parseFloat(document.getElementById("j-open").value),
+    stop_loss: parseFloat(document.getElementById("j-sl").value),
+    take_profit: document.getElementById("j-tp").value ? parseFloat(document.getElementById("j-tp").value) : null,
+    lot_size: parseFloat(document.getElementById("j-lot").value),
+    rationale: document.getElementById("j-rationale").value || null,
+  };
+  const box = document.getElementById("journal-open-result");
+  box.style.display = "block";
+  try {
+    const r = await fetch("/journal/trades", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) { box.className = "result-box error"; box.textContent = "Error: " + (data.detail || r.statusText); return; }
+    box.className = "result-box";
+    box.textContent = `Logged trade #${data.id}`;
+    document.getElementById("journal-open-form").reset();
+    loadJournal();
+  } catch (err) {
+    box.className = "result-box error"; box.textContent = "Request failed: " + err;
+  }
+});
+
+async function closeTrade(id) {
+  const closePrice = prompt("Close price?");
+  if (closePrice === null || closePrice === "") return;
+  const notes = prompt("Outcome notes (optional)?") || null;
+  const body = { close_time: new Date().toISOString(), close_price: parseFloat(closePrice), outcome_notes: notes };
+  const r = await fetch(`/journal/trades/${id}`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (!r.ok) { alert("Close failed"); return; }
+  loadJournal();
+}
+window.closeTrade = closeTrade;
+
+async function loadJournal() {
+  const [tradesRes, summaryRes] = await Promise.all([fetch("/journal/trades?limit=30"), fetch("/journal/summary")]);
+  const trades = await tradesRes.json();
+  const summary = await summaryRes.json();
+
+  document.getElementById("journal-summary").innerHTML = `
+    <div class="summary-stat"><span class="n">${summary.total_closed_trades}</span><span class="l">closed trades</span></div>
+    <div class="summary-stat"><span class="n">${summary.win_rate_pct !== null ? summary.win_rate_pct + '%' : '—'}</span><span class="l">win rate</span></div>
+    <div class="summary-stat"><span class="n">${summary.avg_r_multiple !== null ? summary.avg_r_multiple : '—'}</span><span class="l">avg R-multiple</span></div>
+  `;
+
+  const tbody = document.querySelector("#journal-table tbody");
+  tbody.innerHTML = trades.map(t => {
+    const isOpen = !t.close_time;
+    const rClass = t.r_multiple > 0 ? "pos" : (t.r_multiple < 0 ? "neg" : "");
+    return `<tr>
+      <td>${t.id}</td><td>${esc(t.symbol)}</td><td>${esc(t.direction)}</td>
+      <td class="num">${fmtNum(t.open_price)}</td><td class="num">${fmtNum(t.stop_loss)}</td>
+      <td class="num">${fmtNum(t.lot_size, 2)}</td>
+      <td>${isOpen ? "open" : "closed"}</td>
+      <td class="num ${rClass}">${t.r_multiple !== null && t.r_multiple !== undefined ? fmtNum(t.r_multiple, 2) : "—"}</td>
+      <td>${esc(t.rationale || "")}</td>
+      <td>${isOpen ? `<button class="secondary" onclick="closeTrade(${t.id})">Close</button>` : ""}</td>
+    </tr>`;
+  }).join("");
+}
+
+loadContext();
+loadJournal();
+setInterval(loadContext, 90000); // polling refresh, per the confirmed design -- no websockets
+</script>
+</body>
+</html>

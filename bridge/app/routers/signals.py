@@ -11,6 +11,7 @@ router = APIRouter()
 
 
 class SignalIn(BaseModel):
+    strategy_variant: str = "phase1_confluence"
     symbol: str
     signal_time: datetime
     direction: str
@@ -38,16 +39,17 @@ def log_signal(signal: SignalIn):
             cur.execute(
                 """
                 INSERT INTO signals (
-                    symbol, signal_time, direction, d1_trend, h4_setup_valid,
+                    strategy_variant, symbol, signal_time, direction, d1_trend, h4_setup_valid,
                     h1_entry_trigger, atr_value, proposed_entry, proposed_sl,
                     proposed_tp1, proposed_tp2, risk_percent, lot_size,
                     spread_at_signal, session, taken, rejection_reason, features
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 RETURNING id
                 """,
                 (
+                    signal.strategy_variant,
                     signal.symbol,
                     signal.signal_time,
                     signal.direction,

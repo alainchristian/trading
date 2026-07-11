@@ -44,16 +44,22 @@ private:
 public:
    CTrend() : m_ema_fast_handle(INVALID_HANDLE), m_ema_slow_handle(INVALID_HANDLE), m_adx_handle(INVALID_HANDLE) {}
 
+   // `timeframe` defaults to D1 -- Phase 1's own usage is untouched. Added so
+   // Phase 1b's mean-reversion regime filter can reuse this exact
+   // classification (same EMA/ADX logic, same sideways threshold) on H4
+   // instead, per the user's confirmed choice, without redefining the
+   // threshold or duplicating the class.
    bool Init(string symbol, int ema_fast_period, int ema_slow_period, int adx_period,
-             double adx_trend_threshold, double adx_sideways_threshold)
+             double adx_trend_threshold, double adx_sideways_threshold,
+             ENUM_TIMEFRAMES timeframe = PERIOD_D1)
    {
       m_symbol                 = symbol;
       m_adx_trend_threshold    = adx_trend_threshold;
       m_adx_sideways_threshold = adx_sideways_threshold;
 
-      m_ema_fast_handle = iMA(m_symbol, PERIOD_D1, ema_fast_period, 0, MODE_EMA, PRICE_CLOSE);
-      m_ema_slow_handle = iMA(m_symbol, PERIOD_D1, ema_slow_period, 0, MODE_EMA, PRICE_CLOSE);
-      m_adx_handle      = iADX(m_symbol, PERIOD_D1, adx_period);
+      m_ema_fast_handle = iMA(m_symbol, timeframe, ema_fast_period, 0, MODE_EMA, PRICE_CLOSE);
+      m_ema_slow_handle = iMA(m_symbol, timeframe, ema_slow_period, 0, MODE_EMA, PRICE_CLOSE);
+      m_adx_handle      = iADX(m_symbol, timeframe, adx_period);
 
       return (m_ema_fast_handle != INVALID_HANDLE && m_ema_slow_handle != INVALID_HANDLE
               && m_adx_handle != INVALID_HANDLE);

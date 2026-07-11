@@ -134,12 +134,39 @@ public:
       return (long)id_double;
    }
 
+   // --- POST /log-signal, generic JSON variant --- for strategies that don't
+   // share Phase 1's Signal struct/field names (e.g. Phase 1b's mean-
+   // reversion checks) but still want the same request/fallback-log
+   // machinery. Caller builds the full JSON body itself using the Json/Num/
+   // Bool/JsonOrNull/IsoTime helpers below (all public for this reason).
+   long LogSignalJson(string json)
+   {
+      return PostJsonForId("/log-signal", json);
+   }
+
+   // --- Generic POST-JSON-get-id, for any bridge endpoint that returns
+   // {"id": N} --- e.g. /log-context from ContextSnapshotEA.mq5. Same
+   // request/fallback-log machinery as every other logger method here.
+   long PostJsonForId(string endpoint, string json)
+   {
+      string response;
+      int status = SendRequest("POST", m_base_url + endpoint, json, response);
+      if(status != 200)
+         return -1;
+
+      double id_double;
+      if(!ExtractJsonNumber(response, "id", id_double))
+         return -1;
+      return (long)id_double;
+   }
+
    // --- POST /log-trade (open) ---
-   void LogTradeOpen(long signal_id, ulong ticket, string symbol, string direction,
+   void LogTradeOpen(string strategy_variant, long signal_id, ulong ticket, string symbol, string direction,
                       datetime open_time, double open_price, double initial_sl,
                       double initial_tp1, double initial_tp2, double lot_size)
    {
       string json = "{";
+      json += "\"strategy_variant\":" + Json(strategy_variant) + ",";
       json += "\"signal_id\":" + (signal_id > 0 ? IntegerToString(signal_id) : "null") + ",";
       json += "\"ticket\":" + IntegerToString((long)ticket) + ",";
       json += "\"symbol\":" + Json(symbol) + ",";

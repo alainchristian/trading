@@ -317,7 +317,7 @@ void OpenPosition(Signal &sig, double lot, double sl, long signal_id)
    datetime open_time = TimeCurrent();
 
    g_risk.SeedPositionState(position_ticket, signal_id, sl_norm, lot);
-   g_logger.LogTradeOpen(signal_id, position_ticket, _Symbol, sig.direction, open_time,
+   g_logger.LogTradeOpen("phase1_confluence", signal_id, position_ticket, _Symbol, sig.direction, open_time,
                           open_price, sl_norm, sig.proposed_tp1, sig.proposed_tp2, lot);
 }
 //+------------------------------------------------------------------+

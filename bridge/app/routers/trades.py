@@ -23,6 +23,7 @@ _UPDATABLE_COLUMNS = (
 
 
 class TradeOpenIn(BaseModel):
+    strategy_variant: str = "phase1_confluence"
     signal_id: Optional[int] = None
     ticket: int
     symbol: str
@@ -52,12 +53,13 @@ def log_trade(trade: TradeOpenIn):
             cur.execute(
                 """
                 INSERT INTO trades (
-                    signal_id, ticket, symbol, direction, open_time, open_price,
+                    strategy_variant, signal_id, ticket, symbol, direction, open_time, open_price,
                     initial_sl, initial_tp1, initial_tp2, lot_size
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
+                    trade.strategy_variant,
                     trade.signal_id,
                     trade.ticket,
                     trade.symbol,
@@ -106,7 +108,7 @@ def get_trade(ticket: int):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, signal_id, ticket, symbol, direction, open_time, close_time,
+                SELECT id, strategy_variant, signal_id, ticket, symbol, direction, open_time, close_time,
                        open_price, close_price, initial_sl, initial_tp1, initial_tp2,
                        lot_size, r_multiple, mfe, mae, exit_reason, profit
                 FROM trades WHERE ticket = %s
