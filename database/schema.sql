@@ -128,3 +128,49 @@ CREATE TABLE IF NOT EXISTS journal_trades (
 
 CREATE INDEX IF NOT EXISTS idx_journal_trades_symbol ON journal_trades (symbol);
 CREATE INDEX IF NOT EXISTS idx_journal_trades_open_time ON journal_trades (open_time);
+
+-- Phase: macro/rate-differential edge test (H1/H2, see docs/phase-log.md).
+-- Point-in-time policy rates and 2Y/10Y government bond yields from FRED.
+-- `vintage_date` is the real-time-vintage date this row's value was actually
+-- published/known as of (FRED ALFRED real-time API) -- NOT the observation
+-- date. A rate differential "as of" some hour must only join against rows
+-- where vintage_date <= that hour's date, never a later-revised value. Most
+-- of these series (market-observed daily rates/yields) are never revised
+-- after publication, but this column exists so that assumption is enforced
+-- explicitly, not silently relied on -- see Step 1's verification note.
+CREATE TABLE IF NOT EXISTS macro_series (
+    id                  BIGSERIAL PRIMARY KEY,
+    source              TEXT NOT NULL DEFAULT 'fred',
+    series_id           TEXT NOT NULL,        -- FRED series id, e.g. 'DGS10', 'DFF'
+    currency            TEXT NOT NULL,        -- 'USD','EUR','GBP','JPY','AUD'
+    series_type         TEXT NOT NULL,        -- 'short_rate' (policy-linked; see macro/fetch_fred.py for why '2y' isn't used -- FRED has no direct 2Y yield outside the US), 'yield_10y'
+    obs_date            DATE NOT NULL,        -- the date the value describes
+    vintage_date        DATE NOT NULL,        -- when this value was actually known/published
+    value               DOUBLE PRECISION,
+    fetched_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source, series_id, obs_date, vintage_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_macro_series_lookup ON macro_series (currency, series_type, obs_date, vintage_date);
+
+-- High-impact economic calendar events, timestamps only (CPI/NFP/GDP/rate
+-- decisions). Sourced free from MT5's own live Calendar API -- confirmed
+-- (docs/phase-log.md, Step 0.2) to retain historical actual-value timestamps
+-- back to ~2015, but NOT historical consensus/forecast values. H2 was scoped
+-- down accordingly: this table backs an event-occurrence study only, never
+-- a surprise-magnitude one -- do not add a consensus/forecast column here
+-- without re-opening the paid-source decision first.
+CREATE TABLE IF NOT EXISTS macro_calendar_events (
+    id                  BIGSERIAL PRIMARY KEY,
+    currency            TEXT NOT NULL,
+    event_name          TEXT NOT NULL,
+    event_category      TEXT NOT NULL,        -- 'cpi','employment','gdp','rate_decision'
+    release_time        TIMESTAMPTZ NOT NULL,
+    actual_value        DOUBLE PRECISION,
+    previous_value      DOUBLE PRECISION,
+    importance          TEXT,                 -- MQL5 CALENDAR_IMPORTANCE_* as text
+    fetched_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (currency, event_name, release_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_macro_calendar_events_lookup ON macro_calendar_events (currency, event_category, release_time);

@@ -1752,3 +1752,477 @@ unverified PID lookup rather than one tracked from being started this
 session; restarting it is a one-line action for the user
 (`uvicorn app.main:app --host 127.0.0.1 --port 8000`, after stopping
 whatever currently holds that port).
+
+## 2026-07-12 — Cross-project note (documentation only, no code/data/infra shared)
+
+For an honest overall record: the separate, unrelated `forexsystem` project
+ran its own independent LSTM test on price-action features and also found no
+edge (47.1% directional accuracy vs. a 50% baseline). That result stands on
+its own in that project's docs — this is a one-line cross-reference only, in
+support of the new macro/rate-differential test starting below, which is
+scoped entirely to this repo.
+
+## 2026-07-12 — Macro/rate-differential edge test: Step 0
+
+**Scope:** a genuinely different question from every prior test in this
+project — does relative monetary policy (rate differentials, bond yields,
+macro surprises) predict FX moves, using a different data type and causal
+mechanism than any price-action-derived feature tested so far (five
+independent negative results: two hand-built strategies, two FX ML
+escalations, one gold/index cross-asset test).
+
+**Step 0 checkpoint (data source cost/rate-limit research, before any spend
+or account creation):**
+
+- **Policy rates + bond yields — FRED (Federal Reserve Bank of St. Louis):**
+  free, API-key-gated, no published paid tier. Documented rate limit ~120
+  requests/minute; a single call caps at 100,000 observations. Covers
+  Fed/ECB/BoE/BoJ/RBA/RBNZ/BoC/SNB policy rates and 2Y/10Y government bond
+  yields for all currencies in scope, well within free-tier limits for this
+  project's request volume. Commercial-use note: FRED's own terms say some
+  underlying series are sourced from third parties and require separate
+  permission for non-personal use — needs a per-series check at ingestion
+  time, not assumed blanket-clear.
+- **Economic calendar (actual/consensus/first-published) — Trading
+  Economics:** no published self-serve pricing; the API pricing page and
+  Datarade's listing both confirm pricing is quote-based ("contact us"),
+  scaled to request volume/feature set. The only publicly stated free option
+  is a **non-refundable trial capped at 100,000 data points / 100 requests**,
+  auto-charging on expiry if not cancelled — not viable as an ongoing free
+  source. Actual sign-off on cost requires contacting sales directly; no
+  further action taken pending that.
+- **Alternatives surfaced but not verified in depth:** Financial Modeling
+  Prep and Finnhub both publish self-serve free tiers for general market
+  data, but neither vendor's public docs could be confirmed (site is
+  JS-rendered / blocked automated fetch) to include first-published
+  actual-vs-consensus economic-release data specifically in their free tier
+  — this would need direct account signup to verify before relying on it.
+
+**Confirmed with the user:** instrument scope for H1 is FX pairs only
+(EURUSD, GBPUSD, USDJPY, AUDUSD) — the four already validated in prior tests.
+GOLD/US500 excluded from H1 (no natural policy-rate concept); whether to
+include them in H2's event study is still open, revisit separately.
+
+**Calendar source verification (free tier, no spend):** user signed up for a
+free Finnhub account and provided an API key. Live-tested (not assumed from
+docs) against `GET /calendar/economic` — confirmed the key itself works (a
+basic `/quote` call returned 200 with real data), but the economic-calendar
+endpoint specifically returned **HTTP 403 "You don't have access to this
+resource"** — Finnhub gates economic calendar data behind a paid plan, not
+included in the free tier despite it appearing in the general API docs.
+**Result: Finnhub free tier is not viable for this pipeline.**
+
+**FMP free tier tested the same way:** user signed up, provided a key.
+Confirmed the key itself works (`GET /stable/quote?symbol=AAPL` → 200, real
+data), but both the current (`/stable/economic-calendar`) and legacy
+(`/api/v3/economic_calendar`) calendar endpoints returned paid-plan-only
+errors — `402 Restricted Endpoint` and `403 Legacy Endpoint`, respectively.
+**Result: FMP free tier is also not viable for this pipeline.**
+
+**Pattern now confirmed across two independent vendors, by live call, not
+docs:** general market data (quotes) is free; first-published economic
+calendar data (actual/consensus for CPI/NFP/GDP/rate decisions) is
+consistently paid-tier-gated. This is a real cost, not just a Trading
+Economics quirk.
+
+**Cheapest confirmed paid figures surfaced (web research, before any
+signup):** Finnhub prices its economic-data module separately at
+**~$50/month** — the one concrete published number found across all three
+vendors. FMP's general paid plans run ~$29-79/month, but which exact tier
+unlocks the calendar specifically could not be confirmed from public pages
+(JS-rendered, blocks scraping). Trading Economics still has no public price
+at all.
+
+### Free check, before evaluating paid sources further: what does this
+broker's own live MT5 Economic Calendar actually return?
+
+Built `mt5/CalendarCheckEA.mq5` — read-only, no trading, OnInit-only. Queries
+`CalendarValueHistory` for USD/EUR/GBP/JPY/AUD across three windows (recent
+90 days, future 60 days, a fixed deep-historical quarter — 2015 Q1) and
+reports event counts, actual/forecast/previous field population rates, and
+keyword coverage (CPI, NFP/employment, GDP, rate decision).
+
+**Run live** (not the Strategy Tester — `CalendarValueHistory` is already
+confirmed unreliable there, see Phase 1's `NewsFilter` smoke test) on the
+isolated MT5 instance (`C:\trading\_mt5-instance`, terminal data folder
+`85CCDB11961A17398C496650A57327FE`, confirmed via that folder's own
+`origin.txt` before writing anything into it). The instance already had
+`ContextSnapshotEA` live-feeding the dashboard from the prior phase — that
+process was stopped, the calendar check run via a `/config` startup file
+swap, then `ContextSnapshotEA` restored the same way afterward. No live
+trading was interrupted (Phase 1's autonomous EA is closed out NO-GO;
+nothing on this account trades on its own).
+
+One compile-time correction: `MqlCalendarValue::GetActualValue()` etc. on
+this terminal build take no arguments and return `double` directly (not the
+bool-with-outparam form some MQL5 docs describe) — confirmed by the
+compiler's own error + built-in signature dump. Switched to reading the raw
+`actual_value`/`forecast_value`/`prev_value` long fields directly, using
+`LONG_MIN` as the documented "not published" sentinel.
+
+**Results (all 5 currencies, same pattern):**
+
+| Window | USD count | Actual populated | Forecast populated | Keyword coverage |
+|---|---:|---:|---:|---|
+| Recent 90d | 914 | 836/914 (91%) | 550/914 (60%) | CPI/NFP/GDP/rate-decision all present |
+| Future 60d | 569 | n/a (not yet released) | n/a | CPI/NFP/GDP/rate-decision all present |
+| Deep hist (2015 Q1) | 659 | 621/659 (94%) | **0/659 (0%)** | CPI/NFP/GDP/rate-decision all present (rate-decision missing for JPY only) |
+
+EUR/GBP/JPY/AUD followed the identical pattern at smaller scale (e.g. AUD:
+112 recent / 78 future / 131 deep-hist events). Full per-currency numbers in
+`mt5/CalendarCheckEA.mq5`'s own log output, not reproduced line-by-line here.
+
+**Plain reading of this result:**
+- **Better than expected on depth:** the local calendar cache retains real
+  historical actual-value data back to at least 2015 (11 years), not just a
+  live/recent window as the task brief anticipated ("almost certainly won't
+  solve the historical walk-forward backtest need, since a live-only feed
+  has no depth to test against" — turns out there is real depth here).
+- **But it fails on the one thing that matters most for H2's surprise
+  index:** forecast/consensus values are **completely absent (0%)** for the
+  2015 window, only partially populated (60%) even in the recent 90-day
+  window. Without a historical consensus figure, `(actual − consensus) /
+  stdev` cannot be computed from MT5 alone for any past release.
+- **Point-in-time correctness is still unverified, not just incomplete:**
+  MT5's calendar has no revision history exposed by this check — there's no
+  way to confirm whether a 2015 "actual" value shown today is the original
+  first-published number or a later-revised one. Given the pattern already
+  established (forecast data quietly absent for old data despite looking
+  complete for actual/previous), this needs the same skepticism, not
+  assumed-correct just because a number is present.
+
+**Verdict: MT5's own live calendar is usable for the live/forward side only
+(future events + days-to-next-decision, which are known in advance and carry
+no lookahead risk regardless of source) — it cannot supply the historical
+consensus values Step 1/H2 needs for a point-in-time-correct walk-forward.**
+This narrows, but doesn't eliminate, the case for a paid calendar source: a
+paid vendor is still needed specifically for historical actual-vs-consensus,
+not for the whole pipeline.
+
+**Decision (2026-07-12, user): scope H2 down, skip all paid calendar
+sources for now.** No account beyond the two free-tier signups already
+used (Finnhub, FMP) will be paid or upgraded. This is a real scope
+reduction, stated plainly rather than smoothed over:
+
+- **H1 (rate differentials predict direction) is unaffected** — it never
+  needed the calendar, only FRED (free, settled) for policy rates and
+  2Y/10Y yields.
+- **H2 (macro surprises produce short-horizon drift) is redefined.**
+  Originally: event-study weighted by surprise magnitude
+  `(actual − consensus) / stdev`. Consensus data isn't available historically
+  from any free source checked. Redefined to: **does realized volatility/
+  return behave differently in fixed windows following ANY scheduled
+  high-impact release (CPI, NFP/employment, GDP, rate decision), regardless
+  of surprise size, vs. a random-window baseline?** This uses only MT5's
+  free calendar event *timestamps* (confirmed reliably populated back to
+  2015, even where the forecast field is empty) plus existing OHLCV — no
+  paid data. It is a strictly weaker test than the original H2 (can't
+  condition on surprise direction/magnitude, only on event occurrence) —
+  flagged here as a scope change, not a data limitation quietly absorbed.
+
+**Pre-declared bars, written down now, before any pipeline code or model
+run — mirroring this repo's own established methodology exactly, per Step
+4's instruction:**
+
+- **H1**: label = sign of the next-24-H1-bar forward return (same N=24
+  lookahead convention as every prior test in this repo, for direct
+  comparability), pooled across EURUSD/GBPUSD/USDJPY/AUDUSD with
+  group-aware folds, 6-fold walk-forward (5 out-of-sample test folds),
+  purge+embargo of at least 24 bars at each fold boundary (sized to the
+  label window, non-negotiable per the guardrails). **Success bar: AUC ≥
+  0.55 in at least 3 of 5 folds** — identical bar to every prior test in
+  this repo.
+- **H2 (rescoped)**: for each currency, take all high-impact CPI/NFP/GDP/
+  rate-decision release timestamps from the MT5 calendar export, measure
+  absolute return in fixed windows after release (1H, 4H, 24H) for every FX
+  pair involving that currency, compare against an equal-count random-window
+  baseline (same pair, same window lengths, times excluded from any real
+  event's ±24h buffer). **Success bar: mean absolute return in the event
+  window is ≥1.5× the random-window baseline AND a Mann-Whitney U test
+  comparing the two distributions clears p<0.05, replicating in at least 3
+  of the 4 currencies tested** — a replication requirement, not a single
+  lucky pair, matching this project's standing "doesn't replicate = not
+  signal" discipline (instrument-class pivot addendum).
+
+Both bars are locked before Step 1 begins. Proceeding to build the data
+pipeline next.
+
+## 2026-07-12 — Step 1: FRED ingestion, built and run
+
+`macro/discover_fred_series.py` confirmed real FRED series IDs before use
+(not assumed from memory) — see the SERIES_MAP note above for the finding
+that FRED has no direct 2Y constant-maturity government bond yield outside
+the US, and the resulting scope adjustment (short-rate + 10Y-yield tenors
+only, consistent across all five currencies, instead of a mismatched-tenor
+substitute).
+
+`macro/fetch_fred.py` ingests all 10 series into `macro_series`. One real
+build issue found and fixed: FRED's ALFRED `output_type=2` (full vintage
+matrix) is the wrong tool for this — with even a narrow *real-time* window it
+still returns the entire observation history (back to series inception) as
+one row per obs-date with one column per real-time date in range, which made
+FRED's own server time out/500 on anything wider than about a month. Switched
+to plain (current-value) observations plus a separate targeted point-in-time
+check (below), rather than the vintage-matrix endpoint.
+
+**Run: 17,638 rows upserted across all 10 series** (USD short_rate=DFF 4,938
+rows, USD yield_10y=DGS10 3,380, EUR short_rate=ECBMRRFR 4,939, remaining
+monthly series ~161 rows each), 2013-01-01 to present.
+
+**Point-in-time verification (`macro/verify_pit.py`), method stated
+explicitly, not assumed:** for 5 spot-check dates spread across 2015-2024,
+queried each series at two real-time snapshots — shortly after the
+observation date, and as of today — and compared. A real difference would
+mean the "current value" ingested isn't the first-published one.
+
+**Result: 0 genuine revisions found (`REAL_MISMATCH=0`) across all 50
+checks.** But this splits into two honestly different levels of confidence,
+not one uniform "verified":
+- **USD (DFF, DGS10): fully confirmed** — ALFRED has real-time vintage
+  tracking for both series back through 2015, and all 5 dates matched
+  exactly between the early and current snapshot.
+- **EUR/GBP short rates (ECBMRRFR, IUDSOIA): partially confirmed** — ALFRED
+  only tracks vintages for these from ~2022 onward; the 2022/2024 checks
+  matched exactly, but 2015/2018/2020 returned "the series does not exist in
+  ALFRED" (no vintage data to check against at all, not a match or a
+  mismatch — genuinely inconclusive by this method for those dates).
+- **10Y yields for DE/GB/JP/AU and JPY/AUD short rates: not independently
+  verifiable via ALFRED at all** — no real-time vintage tracking exists for
+  these OECD-sourced monthly series at any of the 5 test dates. The
+  current-value-as-first-published assumption for these six series rests on
+  domain knowledge (these are observed market rates/yields, not
+  survey-estimated aggregates like GDP/CPI that go through multi-month
+  revision cycles), not a direct FRED-side check. Stated plainly as a real
+  limitation of this verification method, not silently treated as fully
+  confirmed just because 0 mismatches were found.
+
+`vintage_date` is stored as `obs_date + 1 day` (a small, documented,
+conservative publication-lag assumption for daily-published series) so joins
+can never use a value before it would plausibly have existed.
+
+Next: MT5 calendar historical export for the rescoped H2 event study
+(task #2), then the point-in-time join onto OHLCV (task #3).
+
+## 2026-07-12 — Steps 1 (calendar + join) and 2 (sanity check)
+
+**Calendar export**: `mt5/CalendarExportEA.mq5` (read-only, live run on the
+isolated instance — same stop/run/restore pattern as the Step 0.2 check,
+`ContextSnapshotEA` confirmed back to normal after) exported all
+CPI/employment/GDP/rate-decision events for USD/EUR/GBP/JPY/AUD from
+2015-01-01 to present: **14,701 rows** (USD 2,747, EUR 7,078, GBP 1,940, JPY
+1,941, AUD 995), imported into `macro_calendar_events` via
+`macro/import_calendar_export.py`.
+
+**Point-in-time join**: `macro/build_macro_dataset.py` joins FRED rate
+differentials and the calendar's forward-looking event timing onto the
+existing OHLCV export already used by prior ML tests (`mlfeature_results/`,
+2010-2026, well past the confirmed 2015+ coverage window — reused rather
+than re-exported, no new MT5 pull needed). Point-in-time correctness is
+enforced with `pandas.merge_asof(..., direction="backward")` against
+`vintage_date` (never a plain date-equality join that could silently admit
+same-day-or-later data) for both the differential level and its 1wk/1mo
+rate-of-change (the lagged value uses the same point-in-time method against
+an earlier timestamp, not a naive row-shift). One real dtype bug found and
+fixed (`datetime64[us]` vs `datetime64[s]` mismatch between the OHLCV
+timestamps and the Postgres-sourced vintage dates) — caught immediately by
+`merge_asof`'s own strict dtype check, not silently coerced.
+
+**Result, all 4 pairs**: 96,834-96,846 rows each, ~99.97% with a valid label
+after the 24-bar lookahead trim. Differential ranges are directionally
+sane, a first sign the join is computing correctly rather than just running
+without errors — e.g. USDJPY short-rate differential up to +5.39 (Fed hikes
+against BoJ's negative-rate era), EURUSD mostly negative (matching the ECB's
+long near-zero/negative period against a higher Fed).
+
+**Step 2 sanity check (`macro/sanity_check_plot.py`), before any model
+training:** EURUSD short-rate differential vs. next-24-H1-bar forward
+return, 83,836 rows with both fields present.
+
+- **Pearson correlation: -0.0152** — essentially zero.
+- **Raw scatter**: a dense, symmetric noise cloud at every differential
+  level, no visible slope.
+- **Binned by differential decile**: mean forward return oscillates between
+  roughly -0.0005 and +0.0002 across deciles with no monotonic trend in
+  either direction — decile 8 (second-highest differential) shows the single
+  most negative mean return, immediately next to decile 9 (highest) showing
+  a positive one, which is what patternless noise looks like, not a
+  relationship with a highest-decile knee or reversal.
+
+**Plain reading, stated before any model is trained, per the task brief's
+own instruction:** there is no visible relationship in the raw data. This
+doesn't rule out H1 clearing its pre-declared AUC bar (a real but small
+effect can be invisible to a correlation/decile-mean view and still show up
+walk-forward, particularly if the true relationship is conditional/nonlinear
+rather than the simple linear one checked here) — but it's real information
+to have before spending a training cycle, exactly as the brief anticipated,
+and is consistent with the pattern every prior test in this repo has found.
+
+Proceeding to Step 4 (H1 walk-forward test) with this expectation stated
+plainly in advance, not as an excuse to skip it.
+
+## 2026-07-12 — Step 4: H1 walk-forward result
+
+`macro/h1_walkforward.py`: pooled EURUSD/GBPUSD/USDJPY/AUDUSD, 331,632 rows
+with complete features + label (2013-02-04 to 2026-06-17 — earlier than the
+calendar's 2015+ coverage since `days_to_next_decision` is legitimately
+computable for any bar as long as it's looking at a future scheduled event,
+which is always true regardless of how far back the bar itself is; no
+lookahead risk either way, per the task brief's own note on this feature).
+Same 6-sequential-fold / 5-OOS-test-fold structure as every prior test in
+this repo, logistic regression, no tuning. **Purge (last 24 bars of train
+dropped at each fold boundary) and embargo (first 24 bars of test dropped)
+implemented explicitly** — this wasn't broken out as a separate step in this
+repo's earlier FX tests, but the task brief calls it out as the specific bug
+already found and fixed in `forexsystem`, so it's implemented rigorously
+here regardless of what prior same-repo tests did.
+
+**Walk-forward results, 5 out-of-sample folds:**
+
+| Fold | Train n | Test n | AUC |
+|---|---:|---:|---:|
+| f1→f2 | 54,832 | 55,461 | 0.509 |
+| f2→f3 | 110,389 | 55,242 | 0.518 |
+| f3→f4 | 165,727 | 55,168 | 0.517 |
+| f4→f5 | 221,003 | 55,459 | 0.500 |
+| f5→f6 | 276,414 | 55,025 | 0.518 |
+
+**Folds clearing AUC ≥ 0.55: 0 of 5.**
+
+**Verdict: NO SIGNAL FOUND**, against the pre-declared bar (locked in before
+this script was written), not moved after seeing the result. Every fold
+sits in a tight 0.500-0.518 band — barely above chance at best, and
+literally at chance in one fold (f4→f5, 0.500). This is consistent with the
+Step 2 sanity check's near-zero correlation, and with every prior test in
+this repo and its cross-project counterpart: rate differentials, at least in
+this feature form (level + 1wk/1mo ROC + days-to-next-decision), carry no
+detectable predictive signal for H1/H4/D1-scale FX direction over the next
+24 H1 bars, at this repo's established 0.55 bar.
+
+**This is the sixth independent negative result** for this project (two
+hand-built strategies, two FX ML escalations, the gold/index cross-asset
+test, and now the macro/rate-differential test's H1 leg) — seventh if
+`forexsystem`'s independent LSTM result is folded into the count, per this
+test's own Step 0 documentation note.
+
+Proceeding to Step 5 (H2, rescoped event study) before the final Step 6
+write-up — H1 and H2 were pre-declared as two separate tests within this one
+phase, and H2 hasn't run yet.
+
+## 2026-07-12 — Step 5: H2 event study, a real bug found on the first run
+
+`macro/h2_event_study.py`: 4 currencies tested against their single mapped
+pair (EUR→EURUSD, GBP→GBPUSD, JPY→USDJPY, AUD→AUDUSD — USD excluded from the
+count since it has no single dedicated pair, kept out rather than picked in
+post hoc), "high-impact" defined as the four category types themselves
+(cpi/employment/gdp/rate_decision), not MQL5's separate importance flag —
+checked before running: AUD has **zero** MQL5-"high"-importance CPI/
+employment/GDP events at all (only its rate decisions are flagged high), a
+broker-side tagging quirk, not a real economic distinction; filtering on it
+would have gutted AUD's sample for a reason unrelated to the hypothesis.
+
+**First run used a uniform-random baseline (any hour, any day, only
+excluding ±24h of a real event) and came back "SIGNAL FOUND"**: 3 of 4
+currencies (GBP, JPY, AUD) cleared the pre-declared 24H bar, with large
+ratios (1.5-3.3x) and very small p-values across almost every cell. Before
+accepting this, the design was re-examined rather than taken at face value —
+same "a promising result gets scrutinized, not just a disappointing one"
+standard as everywhere else in this project.
+
+**Real bug found: the uniform-random baseline was confounded with session
+timing, not a fair comparison.** Real macro releases happen at fixed times
+of day (NFP always ~8:30am ET, ECB decisions always ~12:45pm CET, etc.) that
+coincide with active London/NY trading sessions. A baseline drawn from *any*
+hour across the full week includes quiet overnight/Asian-session hours with
+inherently smaller H1 moves for reasons that have nothing to do with the
+release's informational content — comparing "release-time volatility" against
+"volatility including quiet hours" was guaranteed to show an inflated
+"effect" regardless of whether the releases carried any real information.
+This is a bug, not a strictness question, by this project's own standing
+criterion (methodology contradicted the hypothesis being tested, not merely
+producing a less favorable result).
+
+**Fix:** the baseline for each real event is now a random whole-number-of-
+weeks shift (2-52 weeks, either direction) of that same event's own
+timestamp — this exactly preserves hour-of-day and day-of-week, varying only
+which week, then rejects any candidate landing within 24h of a real event.
+
+**Corrected results, primary 24H window:**
+
+| Currency | Pair | n events | mean event abs ret | mean baseline abs ret | ratio | p-value | Clears bar? |
+|---|---|---:|---:|---:|---:|---:|---|
+| EUR | EURUSD | 6,888 | 0.003644 | 0.003165 | 1.151 | 4.8e-20 | No |
+| GBP | GBPUSD | 1,940 | 0.004050 | 0.003837 | 1.056 | 1.4e-3 | No |
+| JPY | USDJPY | 1,941 | 0.004300 | 0.004047 | 1.062 | 0.849 | No |
+| AUD | AUDUSD | 995 | 0.005394 | 0.005065 | 1.065 | 0.126 | No |
+
+(1H/4H windows, reported as supporting context per the pre-declared design,
+not part of the pass/fail bar: only one cell out of 8 — AUD's 1H — clears
+both thresholds; every other cell falls short of the 1.5x ratio requirement,
+several with ratios below 1.0.)
+
+**Currencies clearing the primary bar: 0 of 4. Verdict: NO SIGNAL FOUND**,
+against the pre-declared bar, not moved after seeing the corrected result
+(the bar was locked in before either run).
+
+**Worth stating plainly, not rounding to "nothing":** EUR and GBP still show
+small, statistically significant excess volatility around releases even
+after the session-timing fix (ratio 1.06-1.15, p<0.05) — a real, non-zero
+residual effect, most likely genuine short-lived reaction to the release
+itself. But it's well below the 1.5x meaningful-effect threshold set before
+running anything, so by the pre-registered standard this is correctly NO
+SIGNAL FOUND, not "no effect exists" — the same distinction this project has
+drawn before (e.g. the ML escalation test's "+0.003 mean AUC tick, real but
+not meaningful").
+
+## 2026-07-12 — Step 6: final report, macro/rate-differential test
+
+**Both H1 and H2 came back at chance level. Per the pre-committed stopping
+point (locked in before Step 4 ran), this is the stopping point — no further
+instrument, feature, or data-type variation is being scoped from here without
+a new, explicit decision to do so.**
+
+**H1 (rate differentials predict direction): NO SIGNAL FOUND.** AUC
+0.500-0.518 across 5 purged/embargoed walk-forward folds, pooled across all
+4 FX pairs, 0 of 5 clearing the pre-declared 0.55 bar. Consistent with the
+Step 2 sanity check's near-zero correlation (-0.0152) seen before any model
+was trained.
+
+**H2 (macro surprises produce short-horizon drift, rescoped to event timing
+only): NO SIGNAL FOUND.** 0 of 4 currencies clearing the pre-declared 24H
+bar, after a real session-timing confound was found and fixed in the
+baseline methodology (see above) — the corrected effect sizes (ratio
+1.06-1.15x for EUR/GBP, ~1.0x for JPY/AUD) are small, and while two are
+statistically significant, none reach the 1.5x threshold set in advance.
+
+**What this test adds, given the real scope reduction from Step 0:** the
+result is an honest negative for the two hypotheses **as actually tested**
+here, not a categorical closure of "macro data has no edge." Two real,
+checked limitations bound how far this generalizes:
+- **H1's rate differentials cover level + 1wk/1mo ROC only, not a true 2Y
+  tenor for non-US currencies** (FRED has none — a confirmed data-coverage
+  gap, not a guess) and **no consensus/surprise-index feature at all**,
+  since every free calendar source checked (MT5 live, Finnhub, FMP) turned
+  out not to carry historical actual-vs-consensus data, and the user
+  declined to pursue a paid source for this test.
+- **H2 tests event-occurrence timing only, not surprise magnitude** — the
+  original hypothesis (do bigger surprises produce bigger drift) was never
+  actually tested, because the data needed to weight by surprise size isn't
+  available free. What was tested (does the release happening at all move
+  price beyond ordinary session patterns) is a strictly weaker question,
+  and it also came back negative.
+
+**This is the sixth independent negative result in this project** (two
+hand-built strategies, two FX ML escalations, the gold/index cross-asset
+test, and now this macro/rate-differential test) — **seventh** if
+`forexsystem`'s independent LSTM result (47.1% vs. a 50% baseline, a separate
+project, documented here for an honest overall record only) is folded into
+the count.
+
+**Stopping point, as pre-committed:** no further work is planned within this
+same rate-differential/macro-calendar data type — specifically, no attempt
+to acquire paid consensus data to re-test the surprise-weighted version of
+H2, and no further feature variations on the rate-differential side —
+without a new, explicit decision from the user to open that back up. This
+mirrors the same discipline applied at the end of the FX/gold/index
+edge-search line: report plainly, stop, and let the next move be a deliberate
+choice rather than an automatic continuation.
